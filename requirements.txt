@@ -1,0 +1,12 @@
+# Core dependencies
+requests>=2.31.0
+numpy>=1.24.0
+pandas>=2.0.0
+
+# Visualization
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# Optional but recommended
+# uv for fast virtual environment management
+# Install with: curl -LsSf https://astral.sh/uv/install.sh | sh
