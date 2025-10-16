@@ -6,7 +6,7 @@ Comprehensive benchmarking tool for evaluating vLLM inference performance across
 various context lengths and concurrency levels. Includes real-time GPU monitoring
 and detailed performance metrics collection.
 
-Author: System Performance Engineering Team
+
 License: MIT
 """
 
