@@ -61,7 +61,7 @@ The benchmark suite consists of:
 ### 1. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/vllm-benchmark-suite.git
+git clone https://github.com/notaDestroyer/vllm-benchmark-suite.git
 cd vllm-benchmark-suite
 ```
 
@@ -597,9 +597,9 @@ If you use this benchmark suite in your research or testing:
 ```bibtex
 @software{vllm_benchmark_suite_v2,
   title = {vLLM Performance Benchmark Suite v2.0},
-  author = {Your Name},
+  author = {amit},
   year = {2025},
-  url = {https://github.com/yourusername/vllm-benchmark-suite}
+  url = {https://github.com/notaDestroyer/vllm-benchmark-suite}
 }
 ```
 
@@ -607,7 +607,6 @@ If you use this benchmark suite in your research or testing:
 
 - [vLLM Team](https://github.com/vllm-project/vllm) for the inference engine
 - [FlashInfer](https://github.com/flashinfer-ai/flashinfer) for attention kernels
-- [Rich](https://github.com/Textualize/rich) for terminal UI framework
 - Community contributors and testers
 
 ## Version History
@@ -630,10 +629,6 @@ If you use this benchmark suite in your research or testing:
 - JSON output
 
 ## Support
-
-For issues, questions, or feature requests:
-- GitHub Issues: https://github.com/yourusername/vllm-benchmark-suite/issues
-- Documentation: https://github.com/yourusername/vllm-benchmark-suite/wiki
 
 For vLLM-specific questions:
 - vLLM Documentation: https://docs.vllm.ai/
