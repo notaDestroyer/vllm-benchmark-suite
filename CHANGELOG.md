@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.0 - Enhanced Edition (2025-01-17)
+## v2.0 - Enhanced Edition (2025-10-17)
 
 ### Major Features
 
@@ -234,7 +234,7 @@ Planned features:
 
 ---
 
-## v1.0 - Initial Release (2024-12)
+## v1.0 - Initial Release (2025-10-16)
 
 Initial release with:
 - Multi-context benchmarking (1K to 256K)
