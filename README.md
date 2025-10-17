@@ -1,3 +1,5 @@
+Go to https://github.com/notaDestroyer/vllm-benchmark-suite/wiki for results
+
 # vLLM Performance Benchmark Suite v2.0
 
 Comprehensive benchmarking tool for evaluating vLLM inference performance with automatic backend detection, advanced performance metrics, real-time monitoring, and interactive configuration.
