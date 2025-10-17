@@ -10,3 +10,4 @@ seaborn>=0.12.0
 # Optional but recommended
 # uv for fast virtual environment management
 # Install with: curl -LsSf https://astral.sh/uv/install.sh | sh
+rich>=13.7.0
