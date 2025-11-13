@@ -20,6 +20,8 @@ import threading
 from statistics import mean, stdev, median
 import json
 import matplotlib
+import random
+import string
 
 matplotlib.use("Agg")  # Use non-interactive backend
 import matplotlib.pyplot as plt
@@ -34,6 +36,8 @@ import argparse
 from typing import Dict, List, Optional, Tuple
 import sys
 import os
+import nltk
+from collections import Counter
 from pathlib import Path
 from rich.console import Console
 from rich.table import Table
@@ -50,6 +54,7 @@ from rich.live import Live
 from rich import box
 from rich.text import Text
 from rich.prompt import Prompt, Confirm, IntPrompt
+from transformers import AutoTokenizer
 
 # Rich Console for beautiful terminal output
 console = Console()
@@ -67,6 +72,11 @@ TEST_PAUSE_DURATION = 5  # seconds between tests
 OUTPUT_DIR = "./outputs"  # Output directory for results and visualizations
 DASHBOARD_REFRESH_RATE = 2  # Hz
 
+#establish global random wordlist for sampling
+nltk.download('brown', quiet=True)
+word_freq = Counter(w.lower() for w in nltk.corpus.brown.words() if w.isalpha())
+COMMON_WORDS = [word for word, count in word_freq.most_common(2500)]
+DEFAULT_TOKENIZER = "google/gemma3-4b-it"
 
 class SystemInfo:
     """Collect and store system configuration information."""
@@ -285,6 +295,148 @@ class VLLMServerInfo:
         return info
 
 
+class MetricsMonitor:
+    """
+    vLLM metrics monitoring system.
+    
+    Queries vLLM metrics endpoint to track:
+    - Prefix cache hit rate (queries and hits)
+    - Prefill time (input processing)
+    - Decode time (output generation)
+    """
+    
+    def __init__(self):
+        """Initialize metrics monitor."""
+        self.baseline_queries = 0
+        self.baseline_hits = 0
+        self.baseline_prefill_time = 0.0
+        self.baseline_decode_time = 0.0
+        self.available = False
+    
+    def get_metrics(self) -> Optional[Dict]:
+        """
+        Query vLLM metrics endpoint for current statistics.
+        
+        Returns:
+            Dictionary containing metrics, or None if unavailable
+        """
+        try:
+            metrics_url = f"{API_BASE_URL}/metrics"
+            response = requests.get(metrics_url, timeout=2)
+            
+            if response.status_code != 200:
+                return None
+            
+            metrics_text = response.text
+            queries = 0.0
+            hits = 0.0
+            prefill_time = 0.0
+            decode_time = 0.0
+            
+            for line in metrics_text.split('\n'):
+                if line.startswith('#') or not line.strip():
+                    continue
+                
+                # Extract prefix cache queries
+                if 'vllm:prefix_cache_queries_total' in line:
+                    try:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            queries = float(parts[-1])
+                    except:
+                        pass
+                
+                # Extract prefix cache hits
+                if 'vllm:prefix_cache_hits_total' in line:
+                    try:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            hits = float(parts[-1])
+                    except:
+                        pass
+                
+                # Extract prefill time sum
+                if 'vllm:request_prefill_time_seconds_sum' in line:
+                    try:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            prefill_time = float(parts[-1])
+                    except:
+                        pass
+                
+                # Extract decode time sum
+                if 'vllm:request_decode_time_seconds_sum' in line:
+                    try:
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            decode_time = float(parts[-1])
+                    except:
+                        pass
+            
+            return {
+                "cache_queries": queries,
+                "cache_hits": hits,
+                "prefill_time": prefill_time,
+                "decode_time": decode_time,
+                "timestamp": time.time()
+            }
+        
+        except Exception:
+            return None
+    
+    def start(self) -> bool:
+        """
+        Capture baseline metrics at start of test.
+        
+        Returns:
+            True if metrics are available, False otherwise
+        """
+        stats = self.get_metrics()
+        if stats:
+            self.baseline_queries = stats["cache_queries"]
+            self.baseline_hits = stats["cache_hits"]
+            self.baseline_prefill_time = stats["prefill_time"]
+            self.baseline_decode_time = stats["decode_time"]
+            self.available = True
+            return True
+        else:
+            self.available = False
+            return False
+    
+    def stop(self) -> Optional[Dict]:
+        """
+        Calculate metrics deltas since start.
+        
+        Returns:
+            Dictionary containing cache hit rate, prefill/decode times, or None if unavailable
+        """
+        if not self.available:
+            return None
+        
+        stats = self.get_metrics()
+        if not stats:
+            return None
+        
+        # Calculate cache deltas
+        delta_queries = stats["cache_queries"] - self.baseline_queries
+        delta_hits = stats["cache_hits"] - self.baseline_hits
+        hit_rate = (delta_hits / delta_queries * 100) if delta_queries > 0 else 0
+        
+        # Calculate time deltas
+        delta_prefill = stats["prefill_time"] - self.baseline_prefill_time
+        delta_decode = stats["decode_time"] - self.baseline_decode_time
+        
+        return {
+            "cache_hit_rate": hit_rate,
+            "cache_queries_delta": delta_queries,
+            "cache_hits_delta": delta_hits,
+            "total_cache_queries": stats["cache_queries"],
+            "total_cache_hits": stats["cache_hits"],
+            "actual_prefill_time": delta_prefill,
+            "actual_decode_time": delta_decode
+        }
+
+
 class GPUMonitor:
     """
     Real-time GPU performance monitoring system.
@@ -407,7 +559,7 @@ def get_model_name() -> str:
     return DEFAULT_MODEL_NAME
 
 
-def generate_prompt(target_tokens: int) -> str:
+def generate_prompt(target_tokens: int, model_name: str="") -> str:
     """
     Generate a synthetic prompt of approximately target_tokens length.
 
@@ -416,6 +568,7 @@ def generate_prompt(target_tokens: int) -> str:
 
     Args:
         target_tokens: Approximate desired token count
+        model_name: Unused argument, supplied to conform to prompt variety interface.
 
     Returns:
         Generated prompt string
@@ -443,6 +596,80 @@ def generate_prompt(target_tokens: int) -> str:
     repetitions = max(1, (target_tokens - base_tokens) // repeat_tokens)
 
     return base_text + (repeat_text * repetitions)
+
+def make_random_text(ntoks: int) -> str:
+    """Helper function which chooses `ntoks` random words from the NLTK Brown corpus, then stitches them together with whitespace."""
+    return " ".join([random.choice(COMMON_WORDS) for _ in range(ntoks)])
+
+def make_perturbed_story() -> str:
+    RaR = make_random_text(3)
+    SSS = make_random_text(3)
+    CCC = make_random_text(3)
+    BBB = make_random_text(3)
+    WWW = make_random_text(3)
+
+    story_text = f"The wheels on the bus go {RaR}. {RaR}. {RaR}. The wheels on the bus go {RaR}. All through the town.. The wipers on the bus go {SSS}. {SSS}. {SSS}. The wipers on the bus go {SSS}. All through the town.. The people on the bus go {CCC}. {CCC}. {CCC}. The people on the bus go {CCC}. All through the town.. The horn on the bus goes {BBB}. {BBB}. {BBB}. The horn on the bus goes {BBB}. All through the town.. The babies on the bus go {WWW}. {WWW}. {WWW}. The babies on the bus go {WWW}. All through the town."
+
+    return story_text
+
+def generate_deterministic_prompt(target_tokens: int, tokenizer_model: str) -> str:
+    """Creates a purely deterministic prompt which tells a story with some repetition."""
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_model)
+    except Exception as e:
+        print(f"Error loading model tokenizer! Using `{DEFAULT_TOKENIZER}` instead.")
+        tokenizer = AutoTokenizer.from_pretrained(DEFAULT_TOKENIZER)
+
+    query_text = "Provide a concise summary of this story. "
+    story_text = "The wheels on the bus go round and round. Round and round. Round and round. The wheels on the bus go round and round. All through the town.. The wipers on the bus go swish, swish, swish. Swish, swish, swish. Swish, swish, swish. The wipers on the bus go swish, swish, swish. All through the town.. The people on the bus go chat, chat, chat. Chat, chat, chat. Chat, chat, chat. The people on the bus go chat, chat, chat. All through the town.. The horn on the bus goes beep, beep, beep. Beep, beep, beep. Beep, beep, beep. The horn on the bus goes beep, beep, beep. All through the town.. The babies on the bus go waa, waa, waa. Waa, waa, waa. Waa, waa, waa. The babies on the bus go waa, waa, waa. All through the town."
+
+    base_tokens = tokenizer.encode(query_text) + tokenizer.encode(story_text) #core tokens are query + story 1x
+    if len(base_tokens) > target_tokens: return "" #if not enough room for one iteration, return empty str
+
+    #if enough room to repeat, calculate repetitions
+    n_remaining_tokens = target_tokens - len(base_tokens)
+    repetitions = n_remaining_tokens // len(tokenizer.encode(story_text)) #calculate how many times we can repeat the story, use floor division
+    repeat_text = repetitions * (" " + story_text)
+
+    return query_text + story_text + repeat_text
+
+def generate_madlib_prompt(target_tokens: int, tokenizer_model: str) -> str:
+    """Creates a prompt in a mad-lib style, injecting some randomness to promote a moderate amount of cache misses."""
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_model)
+    except Exception as e:
+        print(f"Error loading model tokenizer! Using `{DEFAULT_TOKENIZER}` instead.")
+        tokenizer = AutoTokenizer.from_pretrained(DEFAULT_TOKENIZER)
+    
+    query_text = "Provide a concise summary of this story. "
+    story_text = make_perturbed_story()
+    
+    base_tokens = tokenizer.encode(query_text) + tokenizer.encode(story_text) #core tokens are query + story 1x #core tokens are query + story 1x
+    if len(base_tokens) > target_tokens: return ""
+
+    #if enough room to repeat, calculate repetitions
+    buffer_tokens = int(target_tokens * 0.01) #generate 1% less tokens than context length because random words could tokenize nonuniformly. this should be very rare though.
+    n_remaining_tokens = target_tokens - (len(base_tokens) + buffer_tokens)
+    repetitions = n_remaining_tokens // len(tokenizer.encode(story_text)) #calculate how many times we can repeat the story, use floor division
+    repeat_text = " ".join([make_perturbed_story() for _ in range(repetitions)]) #need to iteratively call story generation for fresh randoms
+    
+    return query_text + story_text + " " + repeat_text
+
+def generate_random_prompt(target_tokens: int, tokenizer_model: str) -> str:
+    """Creates a prompt with almost entirely random text to promote a high number of cache misses."""
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(tokenizer_model)
+    except Exception as e:
+        print(f"Error loading model tokenizer! Using `{DEFAULT_TOKENIZER}` instead.")
+        tokenizer = AutoTokenizer.from_pretrained(DEFAULT_TOKENIZER)
+    
+    query_text = "Find the pattern in the following string. "
+    random_text = ""
+    buffer_tokens = int(target_tokens * 0.05) #generate 5% less than the boundary in case tokenizer is aggressive!
+    n_remaining_tokens = target_tokens - (len(tokenizer.encode(query_text)) + buffer_tokens)
+    random_text = make_random_text(n_remaining_tokens)
+
+    return query_text + random_text
 
 
 def calculate_percentiles(values: List[float]) -> Dict[str, float]:
@@ -536,6 +763,7 @@ def run_benchmark(
     model_name: str = None,
     live_display=None,
     gpu_monitor: GPUMonitor = None,
+    prompt_type: str = "classic",
 ) -> Optional[Dict]:
     """
     Execute benchmark for specific context length and concurrency level.
@@ -547,6 +775,7 @@ def run_benchmark(
         model_name: Model identifier
         live_display: Rich Live display object for real-time updates
         gpu_monitor: GPU monitor instance for real-time stats
+        prompt_type: Type of prompt to generate (classic, deterministic, madlib, random)
 
     Returns:
         Dictionary containing performance metrics or None on failure
@@ -554,11 +783,20 @@ def run_benchmark(
     if not live_display:
         print(f"\n{'=' * 100}")
         print(
-            f"Testing: {context_length:,} token context | {num_concurrent_users} concurrent users"
+            f"Testing: {context_length:,} token context | {num_concurrent_users} concurrent users | {prompt_type} prompt"
         )
         print(f"{'=' * 100}")
 
-    prompt = generate_prompt(context_length)
+    # Map prompt type to generation function
+    prompt_generators = {
+        "classic": generate_prompt,
+        "deterministic": generate_deterministic_prompt,
+        "madlib": generate_madlib_prompt,
+        "random": generate_random_prompt,
+    }
+    
+    prompt_gen_func = prompt_generators.get(prompt_type, generate_prompt)
+    prompt = prompt_gen_func(context_length, model_name)
     actual_prompt_tokens = len(prompt) // 4
 
     results = []
@@ -568,6 +806,10 @@ def run_benchmark(
     local_monitor = gpu_monitor if gpu_monitor else GPUMonitor()
     if not gpu_monitor:
         local_monitor.start()
+
+    # Initialize metrics monitor for this test
+    metrics_monitor = MetricsMonitor()
+    metrics_monitor.start()
 
     start_time = time.time()
 
@@ -594,6 +836,9 @@ def run_benchmark(
     gpu_stats = None
     if not gpu_monitor:
         gpu_stats = local_monitor.stop()
+
+    # Stop metrics monitor and get metrics
+    metrics_stats = metrics_monitor.stop()
 
     # Calculate statistics
     successful = [r for r in results if r.get("success", False)]
@@ -672,6 +917,7 @@ def run_benchmark(
         result_dict = {
             "context_length": context_length,
             "concurrent_users": num_concurrent_users,
+            "prompt_type": prompt_type,
             "total_time": total_time,
             "successful": len(successful),
             "failed": failed,
@@ -686,6 +932,18 @@ def run_benchmark(
             "avg_prompt_tokens": avg_prompt_tokens,
             "avg_completion_tokens": avg_tokens_per_request,
         }
+
+        # Add metrics statistics if available
+        if metrics_stats:
+            result_dict.update(metrics_stats)
+            
+            # Calculate prefill speed if we have actual prefill time
+            if "actual_prefill_time" in metrics_stats and metrics_stats["actual_prefill_time"] > 0:
+                # Prefill speed = average prompt tokens / actual prefill time
+                result_dict["prefill_speed"] = avg_prompt_tokens / metrics_stats["actual_prefill_time"]
+            else:
+                # Fallback to estimate if metrics not available
+                result_dict["prefill_speed"] = 0
 
         # Merge GPU statistics and calculate energy efficiency
         if gpu_stats:
@@ -754,27 +1012,46 @@ def visualize_results(
     server_info: Dict = None,
     output_tokens: int = 500,
 ) -> str:
-    """Generate 9-graph benchmark visualization."""
+    """Generate 10-graph benchmark visualization."""
     df = pd.DataFrame(all_results)
-    has_gpu_stats = "avg_gpu_util" in df.columns
+    
+    #this block downselects the results dataframe to utilize the average results of prompt types the core visualizations
+    has_prompt_types = "prompt_type" in df.columns
+    if has_prompt_types:
+        # Aggregate across prompt types by averaging for each (context_length, concurrent_users) pair
+        console.print(f"[dim]Averaging across {len(df['prompt_type'].unique())} prompt types for main visualizations[/dim]")
+        
+        # Group by context_length and concurrent_users, then average all numeric columns
+        numeric_cols = df.select_dtypes(include=[np.number]).columns.tolist()
+        # Remove columns we don't want to average (keep as-is from first row)
+        preserve_cols = ['context_length', 'concurrent_users']
+        avg_cols = [col for col in numeric_cols if col not in preserve_cols]
+        
+        # Aggregate: mean for numeric, first for non-numeric
+        agg_dict = {col: 'mean' for col in avg_cols}
+        df_main = df.groupby(['context_length', 'concurrent_users'], as_index=False).agg(agg_dict)
+    else:
+        df_main = df.copy()
+    
+    has_gpu_stats = "avg_gpu_util" in df_main.columns
 
     # Calculate prompt processing speed (tokens/second during prefill)
-    if "prefill_time_estimate" in df.columns and "avg_prompt_tokens" in df.columns:
-        df["prompt_processing_speed"] = df["avg_prompt_tokens"] / (df["prefill_time_estimate"] + 0.001)
+    if "prefill_time_estimate" in df_main.columns and "avg_prompt_tokens" in df_main.columns:
+        df_main["prompt_processing_speed"] = df_main["avg_prompt_tokens"] / (df_main["prefill_time_estimate"] + 0.001)
     else:
-        df["prompt_processing_speed"] = df["avg_prompt_tokens"] / (df["avg_latency"] * 0.15 + 0.001)
+        df_main["prompt_processing_speed"] = df_main["avg_prompt_tokens"] / (df_main["avg_latency"] * 0.15 + 0.001)
 
     # Calculate inter-token latency (milliseconds between tokens)
-    if "decode_time_estimate" in df.columns and "avg_completion_tokens" in df.columns:
-        df["inter_token_latency"] = (df["decode_time_estimate"] / (df["avg_completion_tokens"] + 0.001)) * 1000
+    if "decode_time_estimate" in df_main.columns and "avg_completion_tokens" in df_main.columns:
+        df_main["inter_token_latency"] = (df_main["decode_time_estimate"] / (df_main["avg_completion_tokens"] + 0.001)) * 1000
     else:
         # Fallback: estimate decode time as 85% of total
-        df["inter_token_latency"] = ((df["avg_latency"] * 0.85) / (df["avg_completion_tokens"] + 0.001)) * 1000
+        df_main["inter_token_latency"] = ((df_main["avg_latency"] * 0.85) / (df_main["avg_completion_tokens"] + 0.001)) * 1000
 
     # Calculate batch scaling efficiency
     baseline_throughput = {}
-    for ctx in df["context_length"].unique():
-        single_user = df[(df["context_length"] == ctx) & (df["concurrent_users"] == 1)]
+    for ctx in df_main["context_length"].unique():
+        single_user = df_main[(df_main["context_length"] == ctx) & (df_main["concurrent_users"] == 1)]
         if len(single_user) > 0:
             baseline_throughput[ctx] = single_user["tokens_per_second"].values[0]
     
@@ -784,9 +1061,9 @@ def visualize_results(
             return 100.0
         return (row["tokens_per_second"] / baseline / row["concurrent_users"]) * 100
     
-    df["batch_efficiency"] = df.apply(calc_efficiency, axis=1)
+    df_main["batch_efficiency"] = df_main.apply(calc_efficiency, axis=1)
 
-    context_lengths = sorted(df["context_length"].unique())
+    context_lengths = sorted(df_main["context_length"].unique())
     context_labels = [f"{int(c / 1000)}K" for c in context_lengths]
 
     # Styling
@@ -809,22 +1086,45 @@ def visualize_results(
         height_ratios=[1, 1, 1, 1, 1]
     )
 
-    # Layout: 12 graphs total
+    # Layout: 13+ graphs total (12 existing + 1 prompt type comparison + cache heatmaps)
     # Row 1: Throughput landscape
     # Row 2: Two heatmaps only
     # Rows 3-5: Line plots (3×3 grid)
-    fig = plt.figure(figsize=(24, 24))
+    # Row 6: Prompt type comparison landscape (only if prompt types available)
+    # Row 7+: Cache heatmaps (one per prompt type, if available)
+    
+    # Check if we need cache rows
+    has_cache_stats = "cache_hit_rate" in df.columns
+    need_cache_rows = has_prompt_types and has_cache_stats
+    
+    if need_cache_rows:
+        num_prompt_types = len(df["prompt_type"].unique())
+        # Calculate how many rows needed for cache heatmaps (2 per row)
+        cache_rows = (num_prompt_types + 1) // 2
+        num_rows = 6 + cache_rows
+        height_ratios = [1, 1, 1, 1, 1, 1] + [0.8] * cache_rows
+        fig_height = 24 + (cache_rows * 5)
+    elif has_prompt_types:
+        num_rows = 6
+        height_ratios = [1, 1, 1, 1, 1, 1]
+        fig_height = 24
+    else:
+        num_rows = 5
+        height_ratios = [1, 1, 1, 1, 1]
+        fig_height = 24
+    
+    fig = plt.figure(figsize=(24, fig_height))
     gs = fig.add_gridspec(
-        5, 3, hspace=0.40, wspace=0.28, left=0.06, right=0.98, top=0.96, bottom=0.04,
-        height_ratios=[1, 1, 1, 1, 1]
+        num_rows, 3, hspace=0.40, wspace=0.28, left=0.06, right=0.98, top=0.96, bottom=0.04,
+        height_ratios=height_ratios
     )
 
     colors = ["#2E86AB", "#A23B72", "#F18F01", "#C73E1D", "#6A994E", "#BC4B51"]
 
     # GRAPH 1: Throughput vs Context Length (Landscape)
     ax1 = fig.add_subplot(gs[0, :])
-    for idx, users in enumerate(sorted(df["concurrent_users"].unique())):
-        data = df[df["concurrent_users"] == users].sort_values("context_length")
+    for idx, users in enumerate(sorted(df_main["concurrent_users"].unique())):
+        data = df_main[df_main["concurrent_users"] == users].sort_values("context_length")
         ax1.plot(
             data["context_length"] / 1000, data["tokens_per_second"],
             marker="o", linewidth=3, markersize=10, label=f"{users} users",
@@ -842,7 +1142,7 @@ def visualize_results(
     # ROW 2: HEATMAPS ONLY (spanning full width)
     # GRAPH 2: Throughput Heatmap
     ax2 = fig.add_subplot(gs[1, :2])  # Span 2 columns
-    pivot_throughput = df.pivot(index="context_length", columns="concurrent_users", values="tokens_per_second")
+    pivot_throughput = df_main.pivot(index="context_length", columns="concurrent_users", values="tokens_per_second")
     sns.heatmap(pivot_throughput, annot=True, fmt=".0f", cmap="RdYlGn", ax=ax2,
                 cbar_kws={"label": "Tokens/sec", "shrink": 0.9}, linewidths=1.5,
                 linecolor="white", annot_kws={"fontsize": 10, "weight": "bold"})
@@ -853,7 +1153,7 @@ def visualize_results(
 
     # GRAPH 3: Latency Heatmap
     ax3 = fig.add_subplot(gs[1, 2])  # Single column
-    pivot_latency = df.pivot(index="context_length", columns="concurrent_users", values="avg_latency")
+    pivot_latency = df_main.pivot(index="context_length", columns="concurrent_users", values="avg_latency")
     sns.heatmap(pivot_latency, annot=True, fmt=".1f", cmap="RdYlGn_r", ax=ax3,
                 cbar_kws={"label": "Latency (sec)", "shrink": 0.9}, linewidths=1.5,
                 linecolor="white", annot_kws={"fontsize": 10, "weight": "bold"})
@@ -865,8 +1165,8 @@ def visualize_results(
     # ROW 3: Line plots
     # GRAPH 4: Throughput per User
     ax4 = fig.add_subplot(gs[2, 0])
-    for idx, users in enumerate(sorted(df["concurrent_users"].unique())):
-        data = df[df["concurrent_users"] == users].sort_values("context_length")
+    for idx, users in enumerate(sorted(df_main["concurrent_users"].unique())):
+        data = df_main[df_main["concurrent_users"] == users].sort_values("context_length")
         ax4.plot(
             data["context_length"] / 1000, data["throughput_per_user"],
             marker="s", linewidth=2.5, markersize=9, label=f"{users} users",
@@ -883,8 +1183,8 @@ def visualize_results(
 
     # GRAPH 5: Time to First Token
     ax5 = fig.add_subplot(gs[2, 1])
-    for idx, users in enumerate(sorted(df["concurrent_users"].unique())):
-        data = df[df["concurrent_users"] == users].sort_values("context_length")
+    for idx, users in enumerate(sorted(df_main["concurrent_users"].unique())):
+        data = df_main[df_main["concurrent_users"] == users].sort_values("context_length")
         ax5.plot(
             data["context_length"] / 1000, data["ttft_estimate"] * 1000,
             marker="*", linewidth=2.5, markersize=11, label=f"{users} users",
@@ -918,8 +1218,8 @@ def visualize_results(
 
     # GRAPH 6: Average Latency vs Context Length
     ax6 = fig.add_subplot(gs[2, 2])
-    for idx, users in enumerate(sorted(df["concurrent_users"].unique())):
-        data = df[df["concurrent_users"] == users].sort_values("context_length")
+    for idx, users in enumerate(sorted(df_main["concurrent_users"].unique())):
+        data = df_main[df_main["concurrent_users"] == users].sort_values("context_length")
         ax6.plot(
             data["context_length"] / 1000, data["avg_latency"],
             marker="D", linewidth=2.5, markersize=9, label=f"{users} users",
@@ -954,8 +1254,8 @@ def visualize_results(
     # ROW 4
     # GRAPH 7: Prompt Processing Speed
     ax7 = fig.add_subplot(gs[3, 0])
-    for idx, users in enumerate(sorted(df["concurrent_users"].unique())):
-        data = df[df["concurrent_users"] == users].sort_values("context_length")
+    for idx, users in enumerate(sorted(df_main["concurrent_users"].unique())):
+        data = df_main[df_main["concurrent_users"] == users].sort_values("context_length")
         ax7.plot(
             data["context_length"] / 1000, data["prompt_processing_speed"],
             marker="^", linewidth=2.5, markersize=9, label=f"{users} users",
@@ -973,8 +1273,8 @@ def visualize_results(
     # GRAPH 8: Power Draw
     ax8 = fig.add_subplot(gs[3, 1])
     if has_gpu_stats:
-        for idx, users in enumerate(sorted(df["concurrent_users"].unique())):
-            data = df[df["concurrent_users"] == users].sort_values("context_length")
+        for idx, users in enumerate(sorted(df_main["concurrent_users"].unique())):
+            data = df_main[df_main["concurrent_users"] == users].sort_values("context_length")
             color = colors[idx % len(colors)]
             ax8.plot(data["context_length"] / 1000, data["avg_power"],
                     marker="o", linewidth=2.5, markersize=9, label=f"{users} users",
@@ -997,8 +1297,8 @@ def visualize_results(
     # GRAPH 9: GPU Clock Frequency
     ax9 = fig.add_subplot(gs[3, 2])
     if has_gpu_stats:
-        for idx, users in enumerate(sorted(df["concurrent_users"].unique())):
-            data = df[df["concurrent_users"] == users].sort_values("context_length")
+        for idx, users in enumerate(sorted(df_main["concurrent_users"].unique())):
+            data = df_main[df_main["concurrent_users"] == users].sort_values("context_length")
             ax9.plot(
                 data["context_length"] / 1000, data["avg_gpu_clock"],
                 marker="H", linewidth=2.5, markersize=9, label=f"{users} users",
@@ -1020,8 +1320,8 @@ def visualize_results(
     # ROW 5
     # GRAPH 10: Inter-Token Latency
     ax10 = fig.add_subplot(gs[4, 0])
-    for idx, users in enumerate(sorted(df["concurrent_users"].unique())):
-        data = df[df["concurrent_users"] == users].sort_values("context_length")
+    for idx, users in enumerate(sorted(df_main["concurrent_users"].unique())):
+        data = df_main[df_main["concurrent_users"] == users].sort_values("context_length")
         ax10.plot(
             data["context_length"] / 1000, data["inter_token_latency"],
             marker="v", linewidth=2.5, markersize=9, label=f"{users} users",
@@ -1055,10 +1355,10 @@ def visualize_results(
 
     # GRAPH 11: Batch Scaling Efficiency
     ax11 = fig.add_subplot(gs[4, 1])
-    for idx, users in enumerate(sorted(df["concurrent_users"].unique())):
+    for idx, users in enumerate(sorted(df_main["concurrent_users"].unique())):
         if users == 1:
             continue
-        data = df[df["concurrent_users"] == users].sort_values("context_length")
+        data = df_main[df_main["concurrent_users"] == users].sort_values("context_length")
         ax11.plot(
             data["context_length"] / 1000, data["batch_efficiency"],
             marker="p", linewidth=2.5, markersize=9, label=f"{users} users",
@@ -1078,9 +1378,9 @@ def visualize_results(
     ax11.set_xticklabels(context_labels)
     
     # Dynamically set y-axis limits based on data
-    if "batch_efficiency" in df.columns and len(df[df["concurrent_users"] > 1]) > 0:
-        max_efficiency = df[df["concurrent_users"] > 1]["batch_efficiency"].max()
-        min_efficiency = df[df["concurrent_users"] > 1]["batch_efficiency"].min()
+    if "batch_efficiency" in df_main.columns and len(df_main[df_main["concurrent_users"] > 1]) > 0:
+        max_efficiency = df_main[df_main["concurrent_users"] > 1]["batch_efficiency"].max()
+        min_efficiency = df_main[df_main["concurrent_users"] > 1]["batch_efficiency"].min()
         y_max = min(max(110, max_efficiency + 10), 200)  # Cap at 200% but ensure 110 minimum
         y_min = max(0, min_efficiency - 5)
         ax11.set_ylim([y_min, y_max])
@@ -1116,8 +1416,8 @@ def visualize_results(
 
     # GRAPH 12: Decode Speed (Generation)
     ax12 = fig.add_subplot(gs[4, 2])
-    for idx, users in enumerate(sorted(df["concurrent_users"].unique())):
-        data = df[df["concurrent_users"] == users].sort_values("context_length")
+    for idx, users in enumerate(sorted(df_main["concurrent_users"].unique())):
+        data = df_main[df_main["concurrent_users"] == users].sort_values("context_length")
         # Calculate decode speed: completion_tokens / decode_time
         if "decode_time_estimate" in data.columns and "avg_completion_tokens" in data.columns:
             decode_speed = data["avg_completion_tokens"] / (data["decode_time_estimate"] + 0.001)
@@ -1139,6 +1439,61 @@ def visualize_results(
     ax12.legend(fontsize=8, loc="best")
     ax12.grid(True, alpha=0.3, linestyle="--")
     ax12.set_facecolor("#FAFAFA")
+    
+    # GRAPH 13: Prompt Type Comparison - Prefill Time (if available)
+    if has_prompt_types and df["prompt_type"].nunique() >= 2:
+        ax13 = fig.add_subplot(gs[5, :])  # Landscape in row 6
+        
+        # Find best user count to compare (prefer 20, or use max available)
+        available_users = sorted(df["concurrent_users"].unique())
+        compare_users = 20 if 20 in available_users else max(available_users)
+        
+        comparison_data = df[df["concurrent_users"] == compare_users]
+        
+        if len(comparison_data) > 0 and "actual_prefill_time" in comparison_data.columns:
+            # Plot each prompt type showing actual prefill time
+            prompt_colors = {
+                "classic": "#2E86AB",
+                "deterministic": "#6A994E", 
+                "madlib": "#F18F01",
+                "random": "#C73E1D"
+            }
+            
+            for idx, ptype in enumerate(sorted(comparison_data["prompt_type"].unique())):
+                data = comparison_data[comparison_data["prompt_type"] == ptype].sort_values("context_length")
+                color = prompt_colors.get(ptype, colors[idx % len(colors)])
+                
+                # Use actual_prefill_time if available, otherwise fall back to estimate
+                if "actual_prefill_time" in data.columns and data["actual_prefill_time"].sum() > 0:
+                    y_data = data["actual_prefill_time"]
+                else:
+                    # Fallback to estimate (15% of total latency)
+                    y_data = data["prefill_time_estimate"]
+                
+                ax13.plot(
+                    data["context_length"] / 1000, y_data,
+                    marker="o", linewidth=3, markersize=10, label=ptype.capitalize(),
+                    color=color, markeredgecolor="white", markeredgewidth=1.5
+                )
+            
+            ax13.set_xlabel("Context Length (K tokens)", fontsize=13, fontweight="bold")
+            ax13.set_ylabel("Prefill Time (seconds)", fontsize=13, fontweight="bold")
+            ax13.set_title(f"Prefill Time by Prompt Type ({compare_users} users)", fontsize=14, fontweight="bold", pad=15)
+            ax13.set_xticks([c / 1000 for c in context_lengths])
+            ax13.set_xticklabels(context_labels)
+            ax13.legend(title="Prompt Type", fontsize=11, title_fontsize=12, loc="best", frameon=True, shadow=True)
+            ax13.grid(True, alpha=0.3, linestyle="--")
+            ax13.set_facecolor("#FAFAFA")
+            
+            # Add explanatory note
+            ax13.text(0.02, 0.98, 'Lower prefill time indicates better cache performance', 
+                     transform=ax13.transAxes, fontsize=9, style='italic',
+                     verticalalignment='top', alpha=0.7)
+        else:
+            ax13.text(0.5, 0.5, f"No data available for {compare_users} users", ha="center", va="center",
+                     fontsize=12, transform=ax13.transAxes)
+            ax13.axis("off")
+    
     # Title
     gpu_info = []
     if system_info:
@@ -1171,7 +1526,63 @@ def visualize_results(
                 fontsize=13, fontweight="bold", y=0.995,
                 bbox=dict(boxstyle="round,pad=0.5", facecolor="wheat", alpha=0.5))
 
-    # Save
+    # CACHE HIT RATE HEATMAPS: Add to main figure if available
+    if need_cache_rows:
+        prompt_types_list = sorted(df["prompt_type"].unique())
+        
+        for idx, ptype in enumerate(prompt_types_list):
+            # Calculate position: 2 heatmaps per row, starting at row 6
+            row_offset = 6
+            cache_row = row_offset + (idx // 2)
+            cache_col = (idx % 2) * 2  # 0 or 2 (span 2 columns each)
+            col_span = 2 if idx % 2 == 0 else 1  # Last one spans remaining space
+            
+            # For odd number of types, last one can span more columns
+            if idx == len(prompt_types_list) - 1 and idx % 2 == 0:
+                col_span = 3  # Span all 3 columns if it's alone
+            
+            if col_span == 2:
+                ax_cache = fig.add_subplot(gs[cache_row, cache_col:cache_col+2])
+            elif col_span == 3:
+                ax_cache = fig.add_subplot(gs[cache_row, :])
+            else:
+                ax_cache = fig.add_subplot(gs[cache_row, 2])
+            
+            # Filter data for this prompt type
+            ptype_data = df[df["prompt_type"] == ptype]
+            
+            # Create pivot table for heatmap
+            pivot_cache = ptype_data.pivot(
+                index="context_length",
+                columns="concurrent_users",
+                values="cache_hit_rate"
+            )
+            
+            # Create heatmap
+            sns.heatmap(
+                pivot_cache,
+                annot=True,
+                fmt=".1f",
+                cmap="RdYlGn",
+                ax=ax_cache,
+                cbar_kws={"label": "Hit Rate (%)", "shrink": 0.8},
+                linewidths=1.5,
+                linecolor="white",
+                annot_kws={"fontsize": 9, "weight": "bold"},
+                vmin=0,
+                vmax=100
+            )
+            
+            ax_cache.set_xlabel("Concurrent Users", fontsize=11, fontweight="bold")
+            ax_cache.set_ylabel("Context Length", fontsize=11, fontweight="bold")
+            ax_cache.set_title(f"Cache Hit Rate: {ptype.capitalize()}", fontsize=12, fontweight="bold", pad=10)
+            ax_cache.set_yticklabels(
+                [f"{int(y / 1000)}K" for y in pivot_cache.index],
+                rotation=0,
+                fontsize=9
+            )
+    
+    # Save - generate timestamp and filenames
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     safe_model_name = sanitize_filename(model_name)
     output_path = ensure_output_directory()
@@ -1179,6 +1590,7 @@ def visualize_results(
     plt.savefig(filename, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close()
     print(f"\n[INFO] Visualization saved: {filename}")
+    
     return str(filename)
 def print_summary_table(all_results: List[Dict]) -> None:
     """
@@ -1190,10 +1602,11 @@ def print_summary_table(all_results: List[Dict]) -> None:
     df = pd.DataFrame(all_results)
     has_gpu_stats = "avg_gpu_util" in df.columns
     has_energy_stats = "watts_per_token_per_user" in df.columns
+    has_cache_stats = "cache_hit_rate" in df.columns
 
-    print("\n" + "=" * 160)
+    print("\n" + "=" * 180)
     print("DETAILED PERFORMANCE SUMMARY")
-    print("=" * 160)
+    print("=" * 180)
 
     # Per-context results
     for context in sorted(df["context_length"].unique()):
@@ -1201,14 +1614,39 @@ def print_summary_table(all_results: List[Dict]) -> None:
             "concurrent_users"
         )
         print(f"\nContext Length: {context:,} tokens ({context / 1000:.0f}K)")
-        print("-" * 160)
+        print("-" * 180)
 
-        if has_gpu_stats and has_energy_stats:
+        if has_gpu_stats and has_energy_stats and has_cache_stats:
+            print(
+                f"{'Users':<8} {'Latency(s)':<12} {'Tok/s':<10} {'Req/s':<10} {'TTFT(ms)':<10} "
+                f"{'GPU%':<8} {'Temp(C)':<10} {'Power(W)':<10} {'W/tok/usr':<12} {'Cache%':<10} {'Success%':<10}"
+            )
+            print("-" * 180)
+
+            for _, row in context_data.iterrows():
+                success_rate = (
+                    row["successful"] / (row["successful"] + row["failed"])
+                ) * 100
+                cache_hit = row.get("cache_hit_rate", 0)
+                print(
+                    f"{row['concurrent_users']:<8} "
+                    f"{row['avg_latency']:<12.2f} "
+                    f"{row['tokens_per_second']:<10.1f} "
+                    f"{row['requests_per_second']:<10.2f} "
+                    f"{row['ttft_estimate'] * 1000:<10.0f} "
+                    f"{row['avg_gpu_util']:<8.1f} "
+                    f"{row['avg_temperature']:<10.1f} "
+                    f"{row['avg_power']:<10.1f} "
+                    f"{row['watts_per_token_per_user']:<12.4f} "
+                    f"{cache_hit:<10.1f} "
+                    f"{success_rate:<10.1f}"
+                )
+        elif has_gpu_stats and has_energy_stats:
             print(
                 f"{'Users':<8} {'Latency(s)':<12} {'Tok/s':<10} {'Req/s':<10} {'TTFT(ms)':<10} "
                 f"{'GPU%':<8} {'Temp(C)':<10} {'Power(W)':<10} {'W/tok/usr':<12} {'Success%':<10}"
             )
-            print("-" * 160)
+            print("-" * 180)
 
             for _, row in context_data.iterrows():
                 success_rate = (
@@ -1363,6 +1801,21 @@ def print_summary_table(all_results: List[Dict]) -> None:
             f"  Throughput degradation from 1K to {single_user.iloc[-1]['context_length'] / 1000:.0f}K: {degradation:.1f}%"
         )
 
+    # Cache efficiency
+    if has_cache_stats:
+        print(f"\nCache Hit Rate Analysis:")
+        print(f"  Best: {df['cache_hit_rate'].max():.1f}%")
+        print(f"  Worst: {df['cache_hit_rate'].min():.1f}%")
+        print(f"  Average: {df['cache_hit_rate'].mean():.1f}%")
+        
+        # If prompt types available, show by prompt type
+        if "prompt_type" in df.columns:
+            print(f"\n  Cache hit rate by prompt type:")
+            for ptype in sorted(df["prompt_type"].unique()):
+                ptype_data = df[df["prompt_type"] == ptype]
+                avg_cache = ptype_data["cache_hit_rate"].mean()
+                print(f"    {ptype.capitalize()}: {avg_cache:.1f}%")
+
     # GPU efficiency
     if has_gpu_stats:
         print(f"\nGPU Efficiency Analysis:")
@@ -1457,12 +1910,12 @@ def warmup_model(model_name: str, output_tokens: int = 100) -> bool:
         return False
 
 
-def get_interactive_config() -> Tuple[List[int], List[int], int]:
+def get_interactive_config() -> Tuple[List[int], List[int], int, List[str]]:
     """
     Interactive CLI for benchmark configuration.
 
     Returns:
-        Tuple of (context_lengths, concurrent_users, output_tokens)
+        Tuple of (context_lengths, concurrent_users, output_tokens, prompt_types)
     """
     console.print("\n[bold cyan]••• Benchmark Configuration •••[/bold cyan]\n")
 
@@ -1536,9 +1989,40 @@ def get_interactive_config() -> Tuple[List[int], List[int], int]:
         output_tokens = IntPrompt.ask("Enter output tokens per request", default=500)
         output_label = f"Custom ({output_tokens} tokens)"
     
+    # Prompt type selection
+    console.print("\n[bold]Select prompt types to test:[/bold]")
+    console.print("  [1] Classic only (default cybersecurity prompt)")
+    console.print("  [2] Deterministic only (high cache hit)")
+    console.print("  [3] Madlib only (moderate cache hit)")
+    console.print("  [4] Random only (low cache hit)")
+    console.print("  [5] All three new types (deterministic + madlib + random)")
+    console.print("  [6] All four types (classic + deterministic + madlib + random)\n")
+    
+    prompt_choice = IntPrompt.ask("Select prompt types", default=5, choices=["1", "2", "3", "4", "5", "6"])
+    
+    if prompt_choice == 1:
+        prompt_types = ["classic"]
+        prompt_label = "Classic only"
+    elif prompt_choice == 2:
+        prompt_types = ["deterministic"]
+        prompt_label = "Deterministic only"
+    elif prompt_choice == 3:
+        prompt_types = ["madlib"]
+        prompt_label = "Madlib only"
+    elif prompt_choice == 4:
+        prompt_types = ["random"]
+        prompt_label = "Random only"
+    elif prompt_choice == 5:
+        prompt_types = ["deterministic", "madlib", "random"]
+        prompt_label = "All three new types"
+    else:  # 6
+        prompt_types = ["classic", "deterministic", "madlib", "random"]
+        prompt_label = "All four types"
+    
     # Show what will be tested
     console.print(f"\n[dim]Context lengths: {', '.join([f'{c//1000}K' for c in context_lengths])}[/dim]")
-    console.print(f"[dim]Concurrent users: {', '.join([str(u) for u in concurrent_users])}[/dim]\n")
+    console.print(f"[dim]Concurrent users: {', '.join([str(u) for u in concurrent_users])}[/dim]")
+    console.print(f"[dim]Prompt types: {', '.join(prompt_types)}[/dim]\n")
 
     # Display configuration summary
     console.print("[bold green]Configuration Summary:[/bold green]")
@@ -1558,9 +2042,10 @@ def get_interactive_config() -> Tuple[List[int], List[int], int]:
         f"{len(concurrent_users)} levels: " + ", ".join([str(u) for u in concurrent_users]),
     )
     config_table.add_row("Output Length", output_label if 'output_label' in locals() else str(output_tokens))
-    config_table.add_row("Total Tests", str(len(context_lengths) * len(concurrent_users)))
+    config_table.add_row("Prompt Types", prompt_label if 'prompt_label' in locals() else ', '.join(prompt_types))
+    config_table.add_row("Total Tests", str(len(context_lengths) * len(concurrent_users) * len(prompt_types)))
 
-    est_time = len(context_lengths) * len(concurrent_users) * 30
+    est_time = len(context_lengths) * len(concurrent_users) * len(prompt_types) * 30
     config_table.add_row("Est. Duration", f"{est_time // 60} min")
 
     console.print(config_table)
@@ -1569,7 +2054,7 @@ def get_interactive_config() -> Tuple[List[int], List[int], int]:
         console.print("[yellow]Benchmark cancelled.[/yellow]")
         sys.exit(0)
 
-    return context_lengths, concurrent_users, output_tokens
+    return context_lengths, concurrent_users, output_tokens, prompt_types
 
 
 def create_live_dashboard(
@@ -1580,7 +2065,7 @@ def create_live_dashboard(
     elapsed_time: float,
     current_gpu: Optional[Dict] = None,
     all_results: List[Dict] = None,
-    remaining_tests: List[Tuple[int, int]] = None,
+    remaining_tests: List[Tuple[int, int, str]] = None,
     all_gpu_history: List[Dict] = None,
     total_benchmark_time: float = 0,
 ) -> Layout:
@@ -1670,8 +2155,8 @@ def create_live_dashboard(
         queue_text = Text()
         queue_text.append(f"Remaining tests:\n\n", style="bold blue")
         
-        for i, (ctx, users) in enumerate(remaining_tests):
-            queue_text.append(f"  {i+1}. {ctx // 1000}K × {users} users\n", style="dim")
+        for i, (ctx, users, ptype) in enumerate(remaining_tests):
+            queue_text.append(f"  {i+1}. {ctx // 1000}K × {users} users × {ptype}\n", style="dim")
         
         layout["remaining"].update(
             Panel(queue_text, title=f"Queue ({len(remaining_tests)} remaining)", border_style="blue")
@@ -1769,7 +2254,7 @@ def main():
     )
 
     # Interactive configuration
-    context_lengths, concurrent_users, output_tokens = get_interactive_config()
+    context_lengths, concurrent_users, output_tokens, prompt_types = get_interactive_config()
 
     # Warmup phase
     console.print("\n[bold cyan]••• Model Warmup Phase •••[/bold cyan]")
@@ -1787,15 +2272,15 @@ def main():
     time.sleep(3)
 
     all_results = []
-    total_tests = len(context_lengths) * len(concurrent_users)
+    total_tests = len(context_lengths) * len(concurrent_users) * len(prompt_types)
     current_test = 0
     start_time_all = time.time()
     benchmark_start_time = time.time()  # Track total benchmark time
 
     console.print("\n[bold green]Starting benchmark execution...[/bold green]\n")
 
-    # Create test queue
-    test_queue = [(ctx, users) for ctx in context_lengths for users in concurrent_users]
+    # Create test queue with prompt types
+    test_queue = [(ctx, users, ptype) for ptype in prompt_types for ctx in context_lengths for users in concurrent_users]
 
     # Initialize shared GPU monitor for all tests
     gpu_monitor = GPUMonitor()
@@ -1806,7 +2291,7 @@ def main():
 
     # Execute benchmarks with live dashboard
     with Live(console=console, refresh_per_second=DASHBOARD_REFRESH_RATE) as live_display:
-        for idx, (context, users) in enumerate(test_queue):
+        for idx, (context, users, ptype) in enumerate(test_queue):
             current_test = idx + 1
             remaining = test_queue[idx + 1 :]
 
@@ -1823,6 +2308,7 @@ def main():
                     model_name=model_name,
                     live_display=live_display,
                     gpu_monitor=gpu_monitor,
+                    prompt_type=ptype,
                 )
 
             import threading as test_threading
@@ -1914,7 +2400,7 @@ def main():
                 # Show completion message
                 summary = (
                     f"[green]OK[/green] Test {current_test}/{total_tests} - "
-                    f"{context // 1000}K ctx x {users} users: "
+                    f"{context // 1000}K ctx x {users} users x {ptype} prompt: "
                     f"[bold yellow]{result['tokens_per_second']:.1f}[/bold yellow] tok/s, "
                     f"[bold cyan]{result['avg_latency']:.2f}s[/bold cyan] latency, "
                     f"[dim]{result['total_time']:.0f}s[/dim]"
@@ -1947,6 +2433,7 @@ def main():
             "context_lengths": context_lengths,
             "concurrent_users": concurrent_users,
             "output_tokens": output_tokens,
+            "prompt_types": prompt_types,
             "pause_duration": TEST_PAUSE_DURATION,
         },
     }
@@ -1964,6 +2451,10 @@ def main():
 
     # Quick summary table
     df = pd.DataFrame(all_results)
+
+    # Save to CSV
+    csv_filename = output_path / f"benchmark_{safe_model_name}_{timestamp}.csv"
+    df.to_csv(csv_filename)
 
     summary_table = Table(
         show_header=True,
