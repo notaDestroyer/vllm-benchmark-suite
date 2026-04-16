@@ -25,11 +25,13 @@ from rich.table import Table
 
 from vllm_benchmark import __version__
 from vllm_benchmark.config import (
+    GPU_PRICING,
     BenchmarkConfig,
     parse_concurrency,
     parse_context_lengths,
 )
-from vllm_benchmark.core.benchmark import run_benchmark, warmup_model
+from vllm_benchmark.core.async_engine import run_benchmark
+from vllm_benchmark.core.benchmark import warmup_model
 from vllm_benchmark.core.metrics import GPUMonitor
 from vllm_benchmark.core.server import SystemInfo, VLLMServerInfo
 from vllm_benchmark.reports.terminal import (
@@ -159,6 +161,15 @@ Examples:
     params.add_argument("--output-tokens", type=int, default=None, help="Max output tokens per request (default: 500)")
     params.add_argument("--prompt-type", default=None, help="Prompt type: classic|deterministic|madlib|random|all")
     params.add_argument("--prompts-file", default=None, help="Path to custom prompts JSONL file")
+    params.add_argument("--rps", type=float, default=None, help="Sustained requests per second mode")
+    params.add_argument("--duration", type=float, default=120, help="Duration in seconds for sustained RPS mode")
+    params.add_argument("--iterations", type=int, default=1, help="Iterations per config for statistical rigor (default: 1)")
+    params.add_argument("--seed", type=int, default=None, help="Random seed for reproducibility")
+
+    # Cost
+    cost_group = parser.add_argument_group("Cost")
+    cost_group.add_argument("--cost", type=float, default=None,
+                             help="GPU cost USD/hr (auto-detected for known GPUs)")
 
     # Behavior
     behavior = parser.add_argument_group("Behavior")
@@ -238,6 +249,13 @@ def main():
     config.generate_charts = not args.no_charts
     if args.prompts_file:
         config.prompts_file = args.prompts_file
+
+    # Seed for reproducibility
+    if args.seed is not None:
+        import random
+        random.seed(args.seed)
+        import numpy as np_seed
+        np_seed.random.seed(args.seed)
     if args.compare:
         config.compare_file = args.compare
 
@@ -253,6 +271,17 @@ def main():
     console.print("[yellow]Querying vLLM server...[/yellow]")
     server_info = VLLMServerInfo.get_server_info(config)
     model_name = config.model_name or server_info.get("model_name") or "unknown"
+
+    # ---- Auto-detect GPU cost ----
+    cost_per_hour = args.cost  # explicit CLI override takes priority
+    if cost_per_hour is None:
+        gpu_name = system_info.get("gpu_name", "")
+        if gpu_name:
+            gpu_lower = gpu_name.lower()
+            for pricing_key, price in GPU_PRICING.items():
+                if pricing_key.lower() in gpu_lower or gpu_lower in pricing_key.lower():
+                    cost_per_hour = price
+                    break
 
     # Display system panel
     sys_table = Table(show_header=False, box=box.ROUNDED, border_style="green")
@@ -273,13 +302,19 @@ def main():
     console.print(Panel(sys_table, title="[bold green]System[/bold green]", border_style="green"))
 
     # Show test plan
-    console.print(f"\n[bold]Test plan:[/bold] {config.total_tests} tests")
+    iterations = args.iterations
+    total_runs = config.total_tests * iterations
+    console.print(f"\n[bold]Test plan:[/bold] {config.total_tests} configs x {iterations} iterations = {total_runs} runs")
     console.print(f"  Context:     {', '.join(f'{c // 1000}K' for c in config.context_lengths)}")
     console.print(f"  Concurrency: {', '.join(str(u) for u in config.concurrency_levels)}")
     console.print(f"  Prompts:     {', '.join(config.prompt_types)}")
     console.print(f"  Output:      {config.output_tokens} tokens")
     if config.streaming:
         console.print("  TTFT:        [green]Streaming (true measurement)[/green]")
+    if iterations > 1:
+        console.print(f"  Iterations:  {iterations} (with statistical aggregation)")
+    if args.seed is not None:
+        console.print(f"  Seed:        {args.seed}")
 
     # ---- Traffic simulation mode ----
     if args.traffic:
@@ -315,6 +350,49 @@ def main():
         console.print("\n[bold green]Traffic simulation complete.[/bold green]\n")
         sys.exit(0)
 
+    # ---- Sustained RPS mode ----
+    if args.rps is not None:
+        import asyncio
+
+        from vllm_benchmark.core.async_engine import run_sustained_benchmark
+
+        console.print("\n[bold yellow]Running sustained RPS benchmark...[/bold yellow]")
+        console.print(f"  Target RPS: {args.rps}")
+        console.print(f"  Duration:   {args.duration}s")
+        console.print(f"  Context:    {config.context_lengths[0] // 1000}K")
+        console.print(f"  Prompt:     {config.prompt_types[0]}")
+        if cost_per_hour is not None:
+            console.print(f"  GPU Cost:   ${cost_per_hour:.2f}/hr")
+
+        result = asyncio.run(run_sustained_benchmark(
+            context_length=config.context_lengths[0],
+            target_rps=args.rps,
+            duration_seconds=args.duration,
+            config=config,
+            model_name=model_name,
+            prompt_type=config.prompt_types[0],
+            cost_per_hour=cost_per_hour,
+        ))
+
+        if result:
+            rps_table = Table(show_header=True, header_style="bold magenta", box=box.DOUBLE, title="Sustained RPS Results")
+            rps_table.add_column("Metric", style="cyan")
+            rps_table.add_column("Value", style="yellow", justify="right")
+            rps_table.add_row("Target RPS", f"{args.rps:.1f}")
+            rps_table.add_row("Actual RPS", f"{result.get('actual_rps', 0):.1f}")
+            rps_table.add_row("Throughput", f"{result['tokens_per_second']:.1f} tok/s")
+            rps_table.add_row("Avg Latency", f"{result['avg_latency']:.2f}s")
+            rps_table.add_row("P99 Latency", f"{result.get('latency_p99', 0):.2f}s")
+            rps_table.add_row("Success Rate", f"{result['successful']}/{result['total_requests']}")
+            if result.get("cost_per_1m_tokens"):
+                rps_table.add_row("Cost / 1M tokens", f"${result['cost_per_1m_tokens']:.4f}")
+            console.print(Panel(rps_table, border_style="cyan"))
+        else:
+            console.print("[red]Sustained RPS benchmark returned no results.[/red]")
+
+        console.print("\n[bold green]Sustained RPS benchmark complete.[/bold green]\n")
+        sys.exit(0)
+
     # ---- Warmup ----
     if config.warmup:
         if not warmup_model(config, model_name):
@@ -324,8 +402,10 @@ def main():
 
     # ---- Benchmark loop ----
     all_results: list[dict] = []
+    iteration_runs: list[list[dict]] = []  # for multi-iteration aggregation
     test_queue = [
-        (ctx, users, pt)
+        (ctx, users, pt, it)
+        for it in range(iterations)
         for pt in config.prompt_types
         for ctx in config.context_lengths
         for users in config.concurrency_levels
@@ -340,7 +420,7 @@ def main():
     all_gpu_history: list[dict] = []
 
     with Live(console=console, refresh_per_second=DASHBOARD_REFRESH_RATE) as live_display:
-        for idx, (context, users, ptype) in enumerate(test_queue):
+        for idx, (context, users, ptype, iteration) in enumerate(test_queue):
             current_test = idx + 1
             remaining = test_queue[idx + 1:]
             test_start = time.time()
@@ -351,6 +431,7 @@ def main():
                 test_result[0] = run_benchmark(
                     _ctx, _users, config, model_name=model_name,
                     live_display=live_display, gpu_monitor=gpu_monitor, prompt_type=_pt,
+                    cost_per_hour=cost_per_hour,
                 )
 
             test_thread = threading.Thread(target=run_test)
@@ -389,11 +470,13 @@ def main():
                         "max_gpu_clock": max([s["gpu_clock"] for s in test_gpu]),
                         "avg_mem_clock": mean([s["mem_clock"] for s in test_gpu]),
                     })
+                result["iteration"] = iteration
                 all_results.append(result)
 
+                iter_tag = f" (iter {iteration + 1})" if iterations > 1 else ""
                 summary = (
-                    f"[green]OK[/green] {current_test}/{total_tests} "
-                    f"{context // 1000}K x {users}u x {ptype}: "
+                    f"[green]OK[/green] {current_test}/{total_runs} "
+                    f"{context // 1000}K x {users}u x {ptype}{iter_tag}: "
                     f"[bold yellow]{result['tokens_per_second']:.1f}[/bold yellow] tok/s, "
                     f"[bold cyan]{result['avg_latency']:.2f}s[/bold cyan]"
                 )
@@ -411,6 +494,22 @@ def main():
         console.print("[red]No successful tests. Check vLLM server.[/red]")
         sys.exit(1)
 
+    # ---- Statistical aggregation (multi-iteration) ----
+    if iterations > 1:
+        from vllm_benchmark.analysis.statistics import aggregate_iterations
+        # Group raw results into per-iteration lists
+        iter_groups: dict[int, list[dict]] = {}
+        for r in all_results:
+            it = r.get("iteration", 0)
+            iter_groups.setdefault(it, []).append(r)
+        iteration_runs = list(iter_groups.values())
+        aggregated = aggregate_iterations(iteration_runs)
+        console.print(f"\n[bold]Aggregated {len(all_results)} runs into {len(aggregated)} configs with 95% CIs[/bold]")
+        # Use aggregated results for scoring/reporting, keep raw for JSON
+        reporting_results = aggregated
+    else:
+        reporting_results = all_results
+
     # ---- Save results ----
     from vllm_benchmark.reports.charts import ensure_output_directory, sanitize_filename
 
@@ -418,17 +517,24 @@ def main():
     safe_model = sanitize_filename(model_name)
     output_path = ensure_output_directory(config.output_dir)
 
+    # Capture full environment fingerprint
+    from vllm_benchmark.core.server import capture_environment
+    environment = capture_environment(server_info)
+
     metadata = {
         "timestamp": timestamp,
         "benchmark_duration": total_time,
         "system_info": system_info,
         "server_info": server_info,
+        "environment": environment,
         "configuration": {
             "context_lengths": config.context_lengths,
             "concurrent_users": config.concurrency_levels,
             "output_tokens": config.output_tokens,
             "prompt_types": config.prompt_types,
             "streaming": config.streaming,
+            "iterations": iterations,
+            "seed": args.seed,
         },
     }
 
@@ -444,15 +550,38 @@ def main():
     # ---- Score ----
     from vllm_benchmark.analysis.scoring import VLLMScore
     scorer = VLLMScore()
-    score = scorer.calculate(all_results, gpu_name=system_info.get("gpu_name"))
+    score = scorer.calculate(reporting_results, gpu_name=system_info.get("gpu_name"))
 
     console.print(f"\n{'=' * 80}")
     console.print(Panel(scorer.format_score_display(score), title="[bold]vLLM Benchmark Score[/bold]", border_style="cyan"))
 
+    # ---- Publish result ----
+    from vllm_benchmark.analysis.publish import create_result_entry, save_result
+    entry = create_result_entry(reporting_results, metadata, score)
+    if entry:
+        result_file = save_result(entry, config.output_dir)
+        console.print(f"  Result: {result_file}")
+
+    # ---- Statistical warnings ----
+    if iterations > 1:
+        from vllm_benchmark.analysis.statistics import compute_robust_stats
+        tps_values = [r["tokens_per_second"] for r in all_results]
+        tps_stats = compute_robust_stats(tps_values)
+        if tps_stats.get("warnings"):
+            console.print("\n[bold yellow]Statistical warnings:[/bold yellow]")
+            for w in tps_stats["warnings"]:
+                console.print(f"  [yellow]WARNING[/yellow] {w}")
+        console.print(
+            f"\n[bold]Throughput (95% CI):[/bold] "
+            f"{tps_stats['mean']:.1f} tok/s "
+            f"[{tps_stats['ci_lower']:.1f}, {tps_stats['ci_upper']:.1f}] "
+            f"(CV={tps_stats['cv']:.3f}, n={tps_stats['n']})"
+        )
+
     # ---- Diagnostics ----
     from vllm_benchmark.analysis.diagnostics import DiagnosticEngine
     engine = DiagnosticEngine()
-    diagnostics = engine.analyze(all_results, server_info)
+    diagnostics = engine.analyze(reporting_results, server_info)
 
     if diagnostics:
         console.print("\n[bold]Diagnostics:[/bold]")
@@ -471,22 +600,33 @@ def main():
     summary_table.add_column("Value", style="yellow", justify="right")
     summary_table.add_column("Configuration", style="green")
 
-    max_tp = df.loc[df["tokens_per_second"].idxmax()]
-    summary_table.add_row("Peak Throughput", f"{max_tp['tokens_per_second']:.1f} tok/s",
+    rdf = pd.DataFrame(reporting_results)
+    max_tp = rdf.loc[rdf["tokens_per_second"].idxmax()]
+    tp_val = f"{max_tp['tokens_per_second']:.1f} tok/s"
+    if "tokens_per_second_ci_lower" in max_tp:
+        tp_val += f" [{max_tp['tokens_per_second_ci_lower']:.1f}, {max_tp['tokens_per_second_ci_upper']:.1f}]"
+    summary_table.add_row("Peak Throughput", tp_val,
                           f"{int(max_tp['concurrent_users'])}u @ {max_tp['context_length'] // 1000}K")
-    best_eff = df.loc[df["throughput_per_user"].idxmax()]
+    best_eff = rdf.loc[rdf["throughput_per_user"].idxmax()]
     summary_table.add_row("Best Efficiency", f"{best_eff['throughput_per_user']:.1f} tok/s/user",
                           f"{int(best_eff['concurrent_users'])}u @ {best_eff['context_length'] // 1000}K")
-    min_lat = df.loc[df["avg_latency"].idxmin()]
-    summary_table.add_row("Lowest Latency", f"{min_lat['avg_latency']:.2f}s",
+    min_lat = rdf.loc[rdf["avg_latency"].idxmin()]
+    lat_val = f"{min_lat['avg_latency']:.2f}s"
+    if "avg_latency_ci_lower" in min_lat:
+        lat_val += f" [{min_lat['avg_latency_ci_lower']:.2f}, {min_lat['avg_latency_ci_upper']:.2f}]"
+    summary_table.add_row("Lowest Latency", lat_val,
                           f"{int(min_lat['concurrent_users'])}u @ {min_lat['context_length'] // 1000}K")
+    costs = [r.get("cost_per_1m_tokens") for r in reporting_results if r.get("cost_per_1m_tokens")]
+    if costs:
+        best_cost = min(costs)
+        summary_table.add_row("Cost / 1M tokens", f"${best_cost:.4f}", "Best configuration")
     console.print(summary_table)
 
     # ---- Charts ----
     if config.generate_charts:
         console.print("\n[yellow]Generating charts...[/yellow]")
         from vllm_benchmark.reports.charts import visualize_results
-        viz_file = visualize_results(all_results, model_name, system_info, server_info, config.output_tokens, config.output_dir)
+        viz_file = visualize_results(reporting_results, model_name, system_info, server_info, config.output_tokens, config.output_dir)
         console.print(f"  [green]Charts:[/green] {viz_file}")
 
     # ---- HTML report ----
@@ -506,6 +646,13 @@ def main():
             console.print(detector.format_report(regressions))
         except Exception as e:
             console.print(f"[red]Regression detection failed: {e}[/red]")
+
+    # ---- Methodology note ----
+    console.print(f"\n[dim]Methodology: async concurrent requests via aiohttp, "
+                  f"{'streaming SSE' if config.streaming else 'batch'} mode, "
+                  f"{iterations} iteration(s), "
+                  f"{'seeded' if args.seed else 'unseeded'}. "
+                  f"Environment fingerprint: {environment.get('fingerprint', 'N/A')[:12]}[/dim]")
 
     # ---- Output summary ----
     console.print("\n[bold cyan]Outputs:[/bold cyan]")

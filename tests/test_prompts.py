@@ -2,8 +2,8 @@
 
 from vllm_benchmark.core.prompts import (
     generate_prompt,
-    load_custom_prompts,
     get_prompt_generator,
+    load_custom_prompts,
 )
 
 
