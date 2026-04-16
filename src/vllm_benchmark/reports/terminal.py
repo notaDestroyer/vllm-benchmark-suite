@@ -132,7 +132,7 @@ def create_live_dashboard(
     elapsed_time: float,
     current_gpu: Optional[Dict] = None,
     all_results: List[Dict] = None,
-    remaining_tests: List[Tuple[int, int, str]] = None,
+    remaining_tests: List[Tuple] = None,
     all_gpu_history: List[Dict] = None,
     total_benchmark_time: float = 0,
 ) -> Layout:
@@ -188,8 +188,10 @@ def create_live_dashboard(
     if remaining_tests and len(remaining_tests) > 0:
         queue_text = Text()
         queue_text.append("Remaining tests:\n\n", style="bold blue")
-        for i, (ctx, users, ptype) in enumerate(remaining_tests):
-            queue_text.append(f"  {i + 1}. {ctx // 1000}K x {users} users x {ptype}\n", style="dim")
+        for i, test in enumerate(remaining_tests):
+            ctx, users, ptype = test[0], test[1], test[2]
+            iter_str = f" (iter {test[3] + 1})" if len(test) > 3 else ""
+            queue_text.append(f"  {i + 1}. {ctx // 1000}K x {users} users x {ptype}{iter_str}\n", style="dim")
         layout["remaining"].update(Panel(queue_text, title=f"Queue ({len(remaining_tests)} remaining)", border_style="blue"))
     else:
         layout["remaining"].update(Panel("Final test running", title="Queue", border_style="green"))
