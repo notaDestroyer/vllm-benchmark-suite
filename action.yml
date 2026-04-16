@@ -1,0 +1,134 @@
+name: "vLLM Benchmark"
+description: "Run vLLM performance benchmarks and post results as PR comments"
+author: "amit"
+
+branding:
+  icon: "activity"
+  color: "blue"
+
+inputs:
+  vllm-url:
+    description: "vLLM server URL"
+    required: false
+    default: "http://localhost:8000"
+  preset:
+    description: "Benchmark preset: quick, standard, or thorough"
+    required: false
+    default: "quick"
+  context-lengths:
+    description: "Comma-separated context lengths (overrides preset)"
+    required: false
+  concurrency:
+    description: "Comma-separated concurrency levels (overrides preset)"
+    required: false
+  output-tokens:
+    description: "Max output tokens per request"
+    required: false
+    default: "500"
+  prompt-type:
+    description: "Prompt type: classic, deterministic, madlib, random, all"
+    required: false
+    default: "classic"
+  compare-with:
+    description: "Path to previous benchmark JSON for regression detection"
+    required: false
+  fail-on-regression:
+    description: "Fail the workflow if major regressions detected"
+    required: false
+    default: "false"
+  python-version:
+    description: "Python version to use"
+    required: false
+    default: "3.12"
+
+outputs:
+  score:
+    description: "Composite vLLM benchmark score (0-10000)"
+    value: ${{ steps.run.outputs.score }}
+  grade:
+    description: "Benchmark grade (S/A/B/C/D/F)"
+    value: ${{ steps.run.outputs.grade }}
+  peak-throughput:
+    description: "Peak throughput in tokens/sec"
+    value: ${{ steps.run.outputs.peak_throughput }}
+  results-json:
+    description: "Path to results JSON file"
+    value: ${{ steps.run.outputs.results_json }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Install vllm-benchmark-suite
+      shell: bash
+      run: pip install vllm-benchmark-suite
+
+    - name: Run benchmark
+      id: run
+      shell: bash
+      run: |
+        ARGS="--url ${{ inputs.vllm-url }} --non-interactive --output-dir ./benchmark-results"
+
+        if [ "${{ inputs.preset }}" = "quick" ]; then
+          ARGS="$ARGS --quick"
+        elif [ "${{ inputs.preset }}" = "standard" ]; then
+          ARGS="$ARGS --standard"
+        elif [ "${{ inputs.preset }}" = "thorough" ]; then
+          ARGS="$ARGS --thorough"
+        fi
+
+        if [ -n "${{ inputs.context-lengths }}" ]; then
+          ARGS="$ARGS --context-lengths ${{ inputs.context-lengths }}"
+        fi
+        if [ -n "${{ inputs.concurrency }}" ]; then
+          ARGS="$ARGS --concurrency ${{ inputs.concurrency }}"
+        fi
+        if [ -n "${{ inputs.compare-with }}" ]; then
+          ARGS="$ARGS --compare ${{ inputs.compare-with }}"
+        fi
+
+        ARGS="$ARGS --output-tokens ${{ inputs.output-tokens }}"
+        ARGS="$ARGS --prompt-type ${{ inputs.prompt-type }}"
+
+        vllm-bench $ARGS
+
+        # Extract results for outputs
+        RESULTS_JSON=$(ls ./benchmark-results/benchmark_*.json | head -1)
+        echo "results_json=$RESULTS_JSON" >> $GITHUB_OUTPUT
+
+        # Parse score from JSON
+        SCORE=$(python -c "import json; d=json.load(open('$RESULTS_JSON')); print(d.get('score', {}).get('overall', 'N/A'))" 2>/dev/null || echo "N/A")
+        GRADE=$(python -c "import json; d=json.load(open('$RESULTS_JSON')); print(d.get('score', {}).get('grade', 'N/A'))" 2>/dev/null || echo "N/A")
+        PEAK=$(python -c "import json; d=json.load(open('$RESULTS_JSON')); print(max(r['tokens_per_second'] for r in d['results']))" 2>/dev/null || echo "N/A")
+
+        echo "score=$SCORE" >> $GITHUB_OUTPUT
+        echo "grade=$GRADE" >> $GITHUB_OUTPUT
+        echo "peak_throughput=$PEAK" >> $GITHUB_OUTPUT
+
+    - name: Upload results
+      uses: actions/upload-artifact@v4
+      with:
+        name: benchmark-results
+        path: ./benchmark-results/
+
+    - name: Check for regressions
+      if: inputs.fail-on-regression == 'true' && inputs.compare-with != ''
+      shell: bash
+      run: |
+        RESULTS_JSON=$(ls ./benchmark-results/benchmark_*.json | head -1)
+        python -c "
+        import json, sys
+        data = json.load(open('$RESULTS_JSON'))
+        regressions = data.get('regressions', [])
+        major = [r for r in regressions if r.get('severity') == 'major' and r.get('is_regression')]
+        if major:
+            print(f'FAIL: {len(major)} major regression(s) detected')
+            for r in major:
+                print(f'  - {r[\"metric\"]}: {r[\"change_pct\"]:+.1f}% at {r[\"context_length\"]}ctx/{r[\"concurrent_users\"]}u')
+            sys.exit(1)
+        print('No major regressions detected')
+        "
