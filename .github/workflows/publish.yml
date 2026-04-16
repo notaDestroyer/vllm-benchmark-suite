@@ -33,6 +33,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: build
     environment: pypi
+    permissions:
+      id-token: write
 
     steps:
       - name: Download build artifacts
@@ -41,11 +43,7 @@ jobs:
           name: dist
           path: dist/
 
-      - name: Install Twine
-        run: pip install twine
-
       - name: Publish to PyPI
-        run: twine upload dist/*
-        env:
-          TWINE_USERNAME: __token__
-          TWINE_PASSWORD: ${{ secrets.PYPI_TOKEN }}
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          password: ${{ secrets.PYPI_TOKEN }}
