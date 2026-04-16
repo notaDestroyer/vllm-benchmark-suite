@@ -1,5 +1,31 @@
 # Changelog
 
+## v3.0.0 - Professional Package (2026-04-16)
+
+### Breaking Changes
+- Restructured as installable Python package: `pip install vllm-benchmark-suite`
+- CLI entry point is now `vllm-bench` (replaces running scripts directly)
+- Removed v1 and v2 standalone scripts
+
+### New Features
+- **vLLM Score**: Composite benchmark score (0-10,000) with grade (S/A/B/C/D/F) — like Geekbench for vLLM
+- **Auto-Diagnostics**: Plain-English analysis with actionable recommendations after every run
+- **Interactive HTML Reports**: Self-contained Plotly-based reports shareable without dependencies
+- **True TTFT Measurement**: SSE streaming-based Time-to-First-Token (not estimates)
+- **Regression Detection**: `--compare previous.json` to catch performance regressions
+- **Benchmark Presets**: `--quick` (5min), `--standard` (30min), `--thorough` (2hr)
+- **Custom Prompts**: `--prompts-file my_prompts.jsonl` for production-realistic testing
+- **Full CLI**: Non-interactive mode (`-y`), all parameters configurable via flags
+
+### Architecture
+- Proper Python package with `src/` layout and `pyproject.toml`
+- Modular structure: `core/`, `analysis/`, `reports/`
+- 18 unit tests covering scoring, diagnostics, and prompt generation
+- GitHub Actions CI for Python 3.10-3.12
+- Issue templates for bug reports and feature requests
+
+---
+
 ## v2.0 - Enhanced Edition (2025-10-17)
 
 ### Major Features

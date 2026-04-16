@@ -1,0 +1,68 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "vllm-benchmark-suite"
+version = "3.0.0"
+description = "The most comprehensive benchmarking suite for vLLM inference servers"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+keywords = ["vllm", "benchmark", "llm", "inference", "gpu", "performance", "latency", "throughput"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: System :: Benchmark",
+]
+dependencies = [
+    "requests>=2.31.0",
+    "numpy>=1.24.0",
+    "pandas>=2.0.0",
+    "nltk>=3.9.0",
+    "matplotlib>=3.7.0",
+    "seaborn>=0.12.0",
+    "rich>=13.7.0",
+    "plotly>=5.18.0",
+    "transformers>=4.40.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "ruff>=0.4.0",
+]
+
+[project.scripts]
+vllm-bench = "vllm_benchmark.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/notadestroyer/vllm-benchmark-suite"
+Repository = "https://github.com/notadestroyer/vllm-benchmark-suite"
+Issues = "https://github.com/notadestroyer/vllm-benchmark-suite/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/vllm_benchmark"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 140
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/vllm_benchmark/reports/charts.py" = ["E501"]
+"src/vllm_benchmark/reports/html_report.py" = ["E501"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
