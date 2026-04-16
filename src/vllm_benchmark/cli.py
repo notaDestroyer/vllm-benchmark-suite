@@ -254,8 +254,8 @@ def main():
     if args.seed is not None:
         import random
         random.seed(args.seed)
-        import numpy as np_seed
-        np_seed.random.seed(args.seed)
+        import numpy as np
+        np.random.seed(args.seed)
     if args.compare:
         config.compare_file = args.compare
 
