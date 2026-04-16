@@ -71,6 +71,10 @@ class DiagnosticEngine:
         diagnostics.extend(self._check_excellent_throughput(results))
         diagnostics.extend(self._check_energy_efficiency(results))
 
+        # Append vLLM config-specific recommendations when server_info is available
+        if server_info:
+            diagnostics.extend(self.advise_config(results, server_info))
+
         has_warning_or_critical = any(
             d.severity in ("critical", "warning") for d in diagnostics
         )
@@ -86,6 +90,194 @@ class DiagnosticEngine:
                     metric="overall",
                 )
             )
+
+        return diagnostics
+
+    def advise_config(self, results: list[dict], server_info: dict) -> list[Diagnostic]:
+        """Produce vLLM config-specific recommendations.
+
+        Examines server configuration alongside benchmark results to
+        surface actionable tuning advice.
+
+        Args:
+            results: List of result dicts from the benchmark run.
+            server_info: Dictionary of server configuration values such as
+                prefix_caching, max_num_seqs, gpu_memory_utilization,
+                tensor_parallel, quantization, etc.
+
+        Returns:
+            List of Diagnostic objects with config recommendations.
+        """
+        diagnostics: list[Diagnostic] = []
+
+        prompt_types = [r.get("prompt_type", "") for r in results if r.get("prompt_type")]
+        all_random = all(pt == "random" for pt in prompt_types) if prompt_types else False
+        has_deterministic = any(
+            pt in ("deterministic", "fixed", "cached") for pt in prompt_types
+        )
+
+        # Rule 1: prefix caching disabled but deterministic prompts would benefit
+        prefix_caching = server_info.get("prefix_caching")
+        if not prefix_caching and has_deterministic:
+            diagnostics.append(
+                Diagnostic(
+                    severity="warning",
+                    title="Enable prefix caching",
+                    message=(
+                        "Enable --enable-prefix-caching on your vLLM server. "
+                        "Your deterministic prompts would benefit significantly."
+                    ),
+                    metric="prefix_caching",
+                )
+            )
+
+        # Rule 2: prefix caching enabled but all prompts are random
+        if prefix_caching and all_random:
+            diagnostics.append(
+                Diagnostic(
+                    severity="warning",
+                    title="Prefix caching overhead with random prompts",
+                    message=(
+                        "You have prefix caching enabled but your prompts are "
+                        "fully random — you're paying cache overhead with no "
+                        "benefit. Consider disabling it for ~5-10% throughput gain."
+                    ),
+                    metric="prefix_caching",
+                )
+            )
+
+        # Rule 3: max_num_seqs too low for tested concurrency
+        max_num_seqs = server_info.get("max_num_seqs")
+        if max_num_seqs is not None:
+            max_users_tested = max(
+                (r.get("concurrent_users", 0) for r in results), default=0
+            )
+            if max_num_seqs < max_users_tested:
+                # Check if throughput at high concurrency is significantly lower
+                high_conc = [
+                    r for r in results
+                    if r.get("concurrent_users", 0) >= max_users_tested
+                    and r.get("tokens_per_second") is not None
+                ]
+                low_conc = [
+                    r for r in results
+                    if r.get("concurrent_users", 0) <= 1
+                    and r.get("tokens_per_second") is not None
+                ]
+                high_tps = (
+                    statistics.mean([r["tokens_per_second"] for r in high_conc])
+                    if high_conc else None
+                )
+                low_tps = (
+                    statistics.mean([r["tokens_per_second"] for r in low_conc])
+                    if low_conc else None
+                )
+                # Emit if high-concurrency throughput is not scaling well
+                if high_tps is not None and low_tps is not None and high_tps < low_tps * 1.5:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity="warning",
+                            title="max_num_seqs too low for concurrency",
+                            message=(
+                                f"Your max_num_seqs ({max_num_seqs}) is lower than "
+                                f"the concurrency you tested ({max_users_tested}). "
+                                "Increase it to allow more concurrent requests."
+                            ),
+                            metric="max_num_seqs",
+                        )
+                    )
+
+        # Rule 4: GPU memory utilization has headroom
+        gpu_mem_util = server_info.get("gpu_memory_utilization")
+        has_failures = any(r.get("failed", 0) > 0 for r in results)
+
+        if gpu_mem_util is not None and gpu_mem_util < 0.85:
+            diagnostics.append(
+                Diagnostic(
+                    severity="info",
+                    title="GPU memory headroom available",
+                    message=(
+                        f"GPU memory utilization is set to {gpu_mem_util:.0%}. "
+                        "You have headroom — consider increasing to 0.90-0.95 "
+                        "for better KV cache capacity."
+                    ),
+                    metric="gpu_memory_utilization",
+                )
+            )
+
+        # Rule 5: GPU memory utilization very high with failures
+        if gpu_mem_util is not None and gpu_mem_util >= 0.95 and has_failures:
+            diagnostics.append(
+                Diagnostic(
+                    severity="critical",
+                    title="High memory utilization with failures",
+                    message=(
+                        f"GPU memory utilization is at {gpu_mem_util:.0%} and "
+                        "you're seeing failures. Try reducing to 0.90."
+                    ),
+                    metric="gpu_memory_utilization",
+                )
+            )
+
+        # Rule 6: tensor parallel with low GPU utilization
+        tp = server_info.get("tensor_parallel")
+        if tp is not None and tp > 1:
+            gpu_utils = []
+            for r in results:
+                gpu = self._gpu(r)
+                util = gpu.get("avg_gpu_util")
+                if util is not None:
+                    gpu_utils.append(util)
+            if gpu_utils:
+                avg_util = statistics.mean(gpu_utils)
+                if avg_util < 70:
+                    diagnostics.append(
+                        Diagnostic(
+                            severity="warning",
+                            title="Low GPU utilization with tensor parallelism",
+                            message=(
+                                f"With tensor_parallel={tp}, GPU utilization is "
+                                f"low ({avg_util:.0f}%). If running a single GPU "
+                                "is feasible, TP=1 may give better single-stream "
+                                "latency."
+                            ),
+                            metric="tensor_parallel",
+                        )
+                    )
+
+        # Rule 7: FP16/BF16 with large model (low throughput + high memory)
+        quantization = server_info.get("quantization")
+        if quantization in ("FP16", "BF16", "FP16/BF16", None):
+            tps_values = [
+                r["tokens_per_second"]
+                for r in results
+                if r.get("tokens_per_second") is not None
+            ]
+            mem_usages = []
+            for r in results:
+                gpu = self._gpu(r)
+                max_mem = gpu.get("max_mem_used")
+                mem_total = gpu.get("mem_total")
+                if max_mem is not None and mem_total is not None and mem_total > 0:
+                    mem_usages.append(max_mem / mem_total)
+
+            low_throughput = (
+                tps_values and statistics.mean(tps_values) < 300
+            )
+            high_memory = mem_usages and statistics.mean(mem_usages) > 0.80
+
+            if low_throughput and high_memory:
+                diagnostics.append(
+                    Diagnostic(
+                        severity="info",
+                        title="Consider quantization",
+                        message=(
+                            "Consider FP8 or AWQ quantization for better "
+                            "throughput with minimal quality loss."
+                        ),
+                        metric="quantization",
+                    )
+                )
 
         return diagnostics
 

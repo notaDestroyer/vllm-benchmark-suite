@@ -172,6 +172,14 @@ Examples:
     output.add_argument("--no-html", action="store_true", help="Skip HTML report generation")
     output.add_argument("--no-charts", action="store_true", help="Skip PNG chart generation")
 
+    # Traffic simulation
+    traffic = parser.add_argument_group("Traffic simulation")
+    traffic.add_argument("--traffic", choices=["poisson", "multiturn"], default=None,
+                         help="Run traffic simulation instead of standard benchmark")
+    traffic.add_argument("--target-rps", type=float, default=2.0, help="Target requests per second (default: 2.0)")
+    traffic.add_argument("--traffic-duration", type=float, default=60.0, help="Traffic simulation duration in seconds (default: 60)")
+    traffic.add_argument("--turns", type=int, default=5, help="Turns per conversation for multiturn mode (default: 5)")
+
     # Comparison
     comp = parser.add_argument_group("Comparison")
     comp.add_argument("--compare", default=None, metavar="FILE", help="Compare with previous results JSON for regression detection")
@@ -272,6 +280,40 @@ def main():
     console.print(f"  Output:      {config.output_tokens} tokens")
     if config.streaming:
         console.print("  TTFT:        [green]Streaming (true measurement)[/green]")
+
+    # ---- Traffic simulation mode ----
+    if args.traffic:
+        from vllm_benchmark.core.prompts import generate_prompt
+        from vllm_benchmark.core.traffic import TrafficConfig, format_traffic_report, run_multiturn_traffic, run_poisson_traffic
+
+        traffic_config = TrafficConfig(
+            target_rps=args.target_rps,
+            duration_seconds=args.traffic_duration,
+            multi_turn=(args.traffic == "multiturn"),
+            turns_per_conversation=args.turns,
+            initial_context_tokens=config.context_lengths[0] if config.context_lengths else 32000,
+            max_tokens=config.output_tokens,
+        )
+
+        console.print(f"\n[bold yellow]Running {args.traffic} traffic simulation...[/bold yellow]")
+        console.print(f"  Target RPS: {traffic_config.target_rps}")
+        console.print(f"  Duration:   {traffic_config.duration_seconds}s")
+        if args.traffic == "multiturn":
+            console.print(f"  Turns:      {traffic_config.turns_per_conversation}")
+
+        if args.traffic == "multiturn":
+            traffic_result = run_multiturn_traffic(
+                traffic_config, model_name, config.api_endpoint, generate_prompt, config.request_timeout,
+            )
+        else:
+            traffic_result = run_poisson_traffic(
+                traffic_config, model_name, config.api_endpoint, generate_prompt, config.request_timeout,
+            )
+
+        report = format_traffic_report(traffic_result, traffic_config)
+        console.print(Panel(report, title="[bold]Traffic Simulation Results[/bold]", border_style="cyan"))
+        console.print("\n[bold green]Traffic simulation complete.[/bold green]\n")
+        sys.exit(0)
 
     # ---- Warmup ----
     if config.warmup:

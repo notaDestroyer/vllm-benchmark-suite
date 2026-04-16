@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from vllm_benchmark.config import GPU_BASELINES
+
 
 @dataclass
 class ScoreBreakdown:
@@ -22,6 +24,8 @@ class ScoreBreakdown:
     energy: int  # 0-10000
     consistency: int  # 0-10000
     grade: str  # "S", "A", "B", "C", "D", "F"
+    gpu_match: str | None = None
+    gpu_percentile: int | None = None
 
 
 class VLLMScore:
@@ -54,17 +58,34 @@ class VLLMScore:
             results: List of result dicts from the benchmark run. Expected
                 keys per result: tokens_per_second, avg_latency, std_latency,
                 throughput_per_user, tokens_per_watt (optional).
-            gpu_name: Optional GPU name (unused for scoring, reserved for
-                future GPU-relative scoring).
+            gpu_name: Optional GPU name for GPU-relative scoring. When
+                provided, reference values from GPU_BASELINES are used
+                instead of global defaults.
 
         Returns:
             ScoreBreakdown with all dimension scores and final grade.
         """
+        # Fuzzy-match gpu_name against GPU_BASELINES keys
+        gpu_match: str | None = None
+        gpu_baseline: dict | None = None
+        if gpu_name:
+            gpu_match, gpu_baseline = self._match_gpu_baseline(gpu_name)
+
+        # Override reference values when a GPU baseline is available
+        if gpu_baseline:
+            self._THROUGHPUT_REF = gpu_baseline["throughput_ref"]
+            self._ENERGY_REF = gpu_baseline["tpw_ref"]
+
         throughput_score = self._score_throughput(results)
         latency_score = self._score_latency(results)
         efficiency_score = self._score_efficiency(results)
         energy_score = self._score_energy(results)
         consistency_score = self._score_consistency(results)
+
+        # Restore class-level defaults so future calls are unaffected
+        if gpu_baseline:
+            self._THROUGHPUT_REF = VLLMScore._THROUGHPUT_REF
+            self._ENERGY_REF = VLLMScore._ENERGY_REF
 
         overall = round(
             throughput_score * self.WEIGHTS["throughput"]
@@ -77,6 +98,11 @@ class VLLMScore:
 
         grade = self._compute_grade(overall)
 
+        # Calculate GPU percentile if baseline exists
+        gpu_percentile: int | None = None
+        if gpu_baseline:
+            gpu_percentile = self._compute_gpu_percentile(results, gpu_baseline)
+
         return ScoreBreakdown(
             overall=overall,
             throughput=throughput_score,
@@ -85,6 +111,8 @@ class VLLMScore:
             energy=energy_score,
             consistency=consistency_score,
             grade=grade,
+            gpu_match=gpu_match,
+            gpu_percentile=gpu_percentile,
         )
 
     def format_score_display(self, score: ScoreBreakdown) -> str:
@@ -124,6 +152,18 @@ class VLLMScore:
             lines.append(
                 f"  {label} ({weight_label:>3}) {bar} {pct_label}"
             )
+
+        # GPU-relative performance line
+        if score.gpu_match is not None and score.gpu_percentile is not None:
+            lines.append(
+                f"  [bold cyan]Your {score.gpu_match} scores "
+                f"{score.gpu_percentile}% of reference throughput[/]"
+            )
+            lines.append(
+                f"  [dim]Your {score.gpu_match} is in the "
+                f"{score.gpu_percentile}th percentile[/]"
+            )
+            lines.append("")
 
         lines.append("")
         return "\n".join(lines)
@@ -197,6 +237,47 @@ class VLLMScore:
             return 5000  # neutral when no data
         best_cv = min(cv_values)
         return self._clamp((1 - best_cv / self._CV_CEIL) * 10000)
+
+    # ------------------------------------------------------------------
+    # GPU baseline helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _match_gpu_baseline(gpu_name: str) -> tuple[str | None, dict | None]:
+        """Fuzzy-match a GPU name against GPU_BASELINES keys.
+
+        Checks if any baseline key is a substring of gpu_name or vice versa
+        (case-insensitive). Returns (matched_key, baseline_dict) or
+        (None, None) if no match is found.
+        """
+        gpu_lower = gpu_name.lower()
+        for key, baseline in GPU_BASELINES.items():
+            key_lower = key.lower()
+            if key_lower in gpu_lower or gpu_lower in key_lower:
+                return key, baseline
+        return None, None
+
+    @staticmethod
+    def _compute_gpu_percentile(results: list[dict], baseline: dict) -> int:
+        """Compute percentile of user's peak throughput vs GPU reference.
+
+        Returns an integer 0-100 representing the percentage of the
+        reference throughput the user achieved. Values above 100 are
+        capped at 100.
+        """
+        tps_values = [
+            r["tokens_per_second"]
+            for r in results
+            if r.get("tokens_per_second") is not None
+        ]
+        if not tps_values:
+            return 0
+        peak_tps = max(tps_values)
+        ref = baseline["throughput_ref"]
+        if ref <= 0:
+            return 0
+        percentile = round((peak_tps / ref) * 100)
+        return max(0, min(100, percentile))
 
     # ------------------------------------------------------------------
     # Helpers
