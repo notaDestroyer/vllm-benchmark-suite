@@ -5,5 +5,5 @@ Install: uv pip install vllm-benchmark-suite
 Usage:   vllm-bench --quick
 """
 
-__version__ = "3.1.0"
+__version__ = "3.1.1"
 __author__ = "amit"
