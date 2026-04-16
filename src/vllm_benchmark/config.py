@@ -43,6 +43,21 @@ GPU_BASELINES = {
     "RTX PRO 6000": {"throughput_ref": 900, "ttft_ref_ms": 140, "tpw_ref": 6.0},
 }
 
+# Cloud GPU hourly pricing (USD/hr) — approximate on-demand rates
+GPU_PRICING = {
+    "H100": 4.00,
+    "A100-80GB": 2.21,
+    "A100-40GB": 1.80,
+    "L40S": 1.50,
+    "RTX 6000 Ada": 1.20,
+    "RTX 4090": 0.74,
+    "RTX 5090": 0.90,
+    "RTX PRO 6000": 1.30,
+    "A10G": 1.10,
+    "T4": 0.53,
+    "L4": 0.70,
+}
+
 
 def parse_context_lengths(text: str) -> list[int]:
     """Parse context lengths from a string like '32k,64k,128k' or '32000,64000'."""
@@ -88,6 +103,13 @@ class BenchmarkConfig:
     output_dir: str = "./outputs"
     generate_html: bool = True
     generate_charts: bool = True
+
+    # Cost
+    cost_per_hour: Optional[float] = None  # GPU cost in USD/hr (auto-detected or manual)
+
+    # Sustained RPS
+    sustained_rps: Optional[float] = None  # Target requests per second
+    sustained_duration: float = 120.0  # Duration in seconds for sustained mode
 
     # Comparison
     compare_file: Optional[str] = None  # Path to previous results JSON

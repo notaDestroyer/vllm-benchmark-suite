@@ -25,11 +25,13 @@ from rich.table import Table
 
 from vllm_benchmark import __version__
 from vllm_benchmark.config import (
+    GPU_PRICING,
     BenchmarkConfig,
     parse_concurrency,
     parse_context_lengths,
 )
-from vllm_benchmark.core.benchmark import run_benchmark, warmup_model
+from vllm_benchmark.core.async_engine import run_benchmark
+from vllm_benchmark.core.benchmark import warmup_model
 from vllm_benchmark.core.metrics import GPUMonitor
 from vllm_benchmark.core.server import SystemInfo, VLLMServerInfo
 from vllm_benchmark.reports.terminal import (
@@ -159,6 +161,13 @@ Examples:
     params.add_argument("--output-tokens", type=int, default=None, help="Max output tokens per request (default: 500)")
     params.add_argument("--prompt-type", default=None, help="Prompt type: classic|deterministic|madlib|random|all")
     params.add_argument("--prompts-file", default=None, help="Path to custom prompts JSONL file")
+    params.add_argument("--rps", type=float, default=None, help="Sustained requests per second mode")
+    params.add_argument("--duration", type=float, default=120, help="Duration in seconds for sustained RPS mode")
+
+    # Cost
+    cost_group = parser.add_argument_group("Cost")
+    cost_group.add_argument("--cost", type=float, default=None,
+                             help="GPU cost USD/hr (auto-detected for known GPUs)")
 
     # Behavior
     behavior = parser.add_argument_group("Behavior")
@@ -254,6 +263,17 @@ def main():
     server_info = VLLMServerInfo.get_server_info(config)
     model_name = config.model_name or server_info.get("model_name") or "unknown"
 
+    # ---- Auto-detect GPU cost ----
+    cost_per_hour = args.cost  # explicit CLI override takes priority
+    if cost_per_hour is None:
+        gpu_name = system_info.get("gpu_name", "")
+        if gpu_name:
+            gpu_lower = gpu_name.lower()
+            for pricing_key, price in GPU_PRICING.items():
+                if pricing_key.lower() in gpu_lower or gpu_lower in pricing_key.lower():
+                    cost_per_hour = price
+                    break
+
     # Display system panel
     sys_table = Table(show_header=False, box=box.ROUNDED, border_style="green")
     sys_table.add_column("", style="cyan bold")
@@ -315,6 +335,49 @@ def main():
         console.print("\n[bold green]Traffic simulation complete.[/bold green]\n")
         sys.exit(0)
 
+    # ---- Sustained RPS mode ----
+    if args.rps is not None:
+        import asyncio
+
+        from vllm_benchmark.core.async_engine import run_sustained_benchmark
+
+        console.print("\n[bold yellow]Running sustained RPS benchmark...[/bold yellow]")
+        console.print(f"  Target RPS: {args.rps}")
+        console.print(f"  Duration:   {args.duration}s")
+        console.print(f"  Context:    {config.context_lengths[0] // 1000}K")
+        console.print(f"  Prompt:     {config.prompt_types[0]}")
+        if cost_per_hour is not None:
+            console.print(f"  GPU Cost:   ${cost_per_hour:.2f}/hr")
+
+        result = asyncio.run(run_sustained_benchmark(
+            context_length=config.context_lengths[0],
+            target_rps=args.rps,
+            duration_seconds=args.duration,
+            config=config,
+            model_name=model_name,
+            prompt_type=config.prompt_types[0],
+            cost_per_hour=cost_per_hour,
+        ))
+
+        if result:
+            rps_table = Table(show_header=True, header_style="bold magenta", box=box.DOUBLE, title="Sustained RPS Results")
+            rps_table.add_column("Metric", style="cyan")
+            rps_table.add_column("Value", style="yellow", justify="right")
+            rps_table.add_row("Target RPS", f"{args.rps:.1f}")
+            rps_table.add_row("Actual RPS", f"{result.get('actual_rps', 0):.1f}")
+            rps_table.add_row("Throughput", f"{result['tokens_per_second']:.1f} tok/s")
+            rps_table.add_row("Avg Latency", f"{result['avg_latency']:.2f}s")
+            rps_table.add_row("P99 Latency", f"{result.get('latency_p99', 0):.2f}s")
+            rps_table.add_row("Success Rate", f"{result['successful']}/{result['total_requests']}")
+            if result.get("cost_per_1m_tokens"):
+                rps_table.add_row("Cost / 1M tokens", f"${result['cost_per_1m_tokens']:.4f}")
+            console.print(Panel(rps_table, border_style="cyan"))
+        else:
+            console.print("[red]Sustained RPS benchmark returned no results.[/red]")
+
+        console.print("\n[bold green]Sustained RPS benchmark complete.[/bold green]\n")
+        sys.exit(0)
+
     # ---- Warmup ----
     if config.warmup:
         if not warmup_model(config, model_name):
@@ -351,6 +414,7 @@ def main():
                 test_result[0] = run_benchmark(
                     _ctx, _users, config, model_name=model_name,
                     live_display=live_display, gpu_monitor=gpu_monitor, prompt_type=_pt,
+                    cost_per_hour=cost_per_hour,
                 )
 
             test_thread = threading.Thread(target=run_test)
@@ -442,12 +506,20 @@ def main():
     df.to_csv(csv_file, index=False)
 
     # ---- Score ----
+    # (computed early so we can pass it to publish)
     from vllm_benchmark.analysis.scoring import VLLMScore
     scorer = VLLMScore()
     score = scorer.calculate(all_results, gpu_name=system_info.get("gpu_name"))
 
     console.print(f"\n{'=' * 80}")
     console.print(Panel(scorer.format_score_display(score), title="[bold]vLLM Benchmark Score[/bold]", border_style="cyan"))
+
+    # ---- Publish result ----
+    from vllm_benchmark.analysis.publish import create_result_entry, save_result
+    entry = create_result_entry(all_results, metadata, score)
+    if entry:
+        result_file = save_result(entry, config.output_dir)
+        console.print(f"  Result: {result_file}")
 
     # ---- Diagnostics ----
     from vllm_benchmark.analysis.diagnostics import DiagnosticEngine
@@ -480,6 +552,10 @@ def main():
     min_lat = df.loc[df["avg_latency"].idxmin()]
     summary_table.add_row("Lowest Latency", f"{min_lat['avg_latency']:.2f}s",
                           f"{int(min_lat['concurrent_users'])}u @ {min_lat['context_length'] // 1000}K")
+    costs = [r.get("cost_per_1m_tokens") for r in all_results if r.get("cost_per_1m_tokens")]
+    if costs:
+        best_cost = min(costs)
+        summary_table.add_row("Cost / 1M tokens", f"${best_cost:.4f}", "Best configuration")
     console.print(summary_table)
 
     # ---- Charts ----

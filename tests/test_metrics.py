@@ -3,10 +3,9 @@
 Author: amit
 """
 
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
 from vllm_benchmark.core.metrics import GPUMonitor, MetricsMonitor
-
 
 # ---------------------------------------------------------------------------
 # GPUMonitor — GPU count detection

@@ -1,6 +1,6 @@
 """Tests for composite benchmark scoring."""
 
-from vllm_benchmark.analysis.scoring import VLLMScore, ScoreBreakdown
+from vllm_benchmark.analysis.scoring import ScoreBreakdown, VLLMScore
 
 
 def _make_result(**overrides):

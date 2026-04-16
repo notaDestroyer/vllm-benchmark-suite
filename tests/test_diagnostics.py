@@ -1,6 +1,6 @@
 """Tests for auto-diagnostics engine."""
 
-from vllm_benchmark.analysis.diagnostics import DiagnosticEngine, Diagnostic
+from vllm_benchmark.analysis.diagnostics import DiagnosticEngine
 
 
 def _make_result(**overrides):
