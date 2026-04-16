@@ -7,7 +7,7 @@ name = "vllm-benchmark-suite"
 version = "3.0.0"
 description = "The most comprehensive benchmarking suite for vLLM inference servers"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
 requires-python = ">=3.10"
 keywords = ["vllm", "benchmark", "llm", "inference", "gpu", "performance", "latency", "throughput"]
 classifiers = [
