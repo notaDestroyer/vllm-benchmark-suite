@@ -102,8 +102,10 @@ def save_result(entry: Dict, output_dir: str = "./outputs") -> str:
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    gpu = entry.get("hardware", {}).get("gpu", "unknown").replace(" ", "_")
-    model = entry.get("software", {}).get("model", "unknown").replace("/", "_")
+    gpu = (entry.get("hardware") or {}).get("gpu") or "unknown"
+    model = (entry.get("software") or {}).get("model") or "unknown"
+    gpu = gpu.replace(" ", "_")
+    model = model.replace("/", "_")
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     filepath = out / f"result_{gpu}_{model}_{ts}.json"

@@ -465,8 +465,9 @@ async def run_benchmark_async(
         print(f"{'=' * 100}")
 
     prompt_gen = get_prompt_generator(prompt_type)
-    prompt = prompt_gen(context_length, model_name or "")
-    actual_prompt_tokens = count_tokens(prompt, model_name or "")
+    tokenizer_id = config.tokenizer or model_name or ""
+    prompt = prompt_gen(context_length, tokenizer_id)
+    actual_prompt_tokens = count_tokens(prompt, tokenizer_id)
 
     local_monitor = gpu_monitor if gpu_monitor else GPUMonitor(config.gpu_poll_interval)
     if not gpu_monitor:
@@ -505,8 +506,9 @@ async def run_sustained_benchmark(
     degrades under sustained load.
     """
     prompt_gen = get_prompt_generator(prompt_type)
-    prompt = prompt_gen(context_length, model_name or "")
-    actual_prompt_tokens = count_tokens(prompt, model_name or "")
+    tokenizer_id = config.tokenizer or model_name or ""
+    prompt = prompt_gen(context_length, tokenizer_id)
+    actual_prompt_tokens = count_tokens(prompt, tokenizer_id)
 
     gpu_monitor = GPUMonitor(config.gpu_poll_interval)
     gpu_monitor.start()

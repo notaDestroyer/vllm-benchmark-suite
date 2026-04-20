@@ -85,6 +85,7 @@ class BenchmarkConfig:
     # Connection
     api_url: str = "http://localhost:8000"
     model_name: Optional[str] = None  # Auto-detected if None
+    tokenizer: Optional[str] = None  # HF repo id or local path; falls back to model_name
 
     # Test matrix
     context_lengths: list[int] = field(default_factory=lambda: [32_000, 64_000, 128_000])
