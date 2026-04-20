@@ -18,6 +18,20 @@ from typing import Dict, Optional
 
 import requests
 
+_nvidia_smi_warned: bool = False
+
+
+def _warn_nvidia_smi_once(err: Exception) -> None:
+    """Emit a GPU-monitoring warning at most once per process."""
+    global _nvidia_smi_warned
+    if _nvidia_smi_warned:
+        return
+    _nvidia_smi_warned = True
+    if isinstance(err, FileNotFoundError):
+        print("[WARNING] nvidia-smi not found — GPU monitoring disabled.", file=sys.stderr)
+    else:
+        print(f"[WARNING] GPU monitoring error: {err}", file=sys.stderr)
+
 
 class MetricsMonitor:
     """vLLM metrics monitoring system.
@@ -289,7 +303,7 @@ class GPUMonitor:
                     per_gpu.append(parsed)
             return per_gpu
         except Exception as e:
-            print(f"[WARNING] GPU monitoring error: {e}", file=sys.stderr)
+            _warn_nvidia_smi_once(e)
             return []
 
     def get_gpu_stats(self) -> Optional[Dict]:
