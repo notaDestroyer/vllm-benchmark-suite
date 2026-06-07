@@ -303,6 +303,7 @@ def _run_non_generative_workloads(
     output_path = ensure_output_directory(config.output_dir)
 
     metadata = {
+        "schema_version": "4.0",
         "timestamp": timestamp,
         "system_info": system_info,
         "server_info": server_info,
@@ -945,6 +946,7 @@ def main():
             quality_section = {"mode": config.quality, "status": "error", "reason": str(exc)}
 
     metadata = {
+        "schema_version": "4.0",
         "timestamp": timestamp,
         "benchmark_duration": total_time,
         "system_info": system_info,
@@ -1080,12 +1082,21 @@ def main():
         html_file = generate_html_report(all_results, metadata, score, diagnostics, config.output_dir)
         console.print(f"  [green]HTML:[/green] {html_file}")
 
-    # ---- Share markdown ----
+    # ---- Share markdown + result card ----
     if config.share:
         from vllm_benchmark.reports.share import build_share_markdown, save_share_markdown
         md = build_share_markdown(reporting_results, metadata, score)
         share_file = save_share_markdown(md, config.output_dir)
         console.print(f"  [green]Share:[/green] {share_file}")
+        try:
+            from pathlib import Path
+
+            from vllm_benchmark.reports.card import render_result_card
+            card_path = str(Path(config.output_dir) / "result_card.png")
+            card_file = render_result_card(reporting_results, metadata, score, out_path=card_path)
+            console.print(f"  [green]Card:[/green] {card_file}")
+        except Exception as exc:  # rendering must never break the run
+            console.print(f"  [yellow]Result card skipped:[/yellow] {exc}")
 
     # ---- Head-to-head A/B (--vs) ----
     if config.vs_url:

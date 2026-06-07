@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vllm-benchmark-suite"
-version = "3.1.1"
+version = "4.0.0"
 description = "The most comprehensive benchmarking suite for vLLM inference servers"
 readme = "README.md"
 license = "MIT"
@@ -35,6 +35,9 @@ dependencies = [
     "plotly>=5.18.0",
     "transformers>=4.40.0",
     "jsonschema>=4.0.0",
+    "huggingface_hub>=0.23",
+    "scipy>=1.11",
+    "psutil>=5.9",
 ]
 
 [project.optional-dependencies]
@@ -48,6 +51,7 @@ report-claude = ["anthropic>=0.40"]
 
 [project.scripts]
 vllm-bench = "vllm_benchmark.cli:main"
+llm-bench = "vllm_benchmark.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/notadestroyer/vllm-benchmark-suite"
