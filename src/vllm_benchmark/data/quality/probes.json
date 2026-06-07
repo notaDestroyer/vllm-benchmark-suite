@@ -1,0 +1,83 @@
+{
+  "_README": "Bundled deterministic quality-probe set for run_quality(mode='probe'). Every probe is graded by exact or regex match against `expected` at temperature=0 so results are reproducible and backend-agnostic (no logprobs required). Categories: arithmetic, factual, format (JSON-following) and instruction (instruction-following). Kept small so a probe run is cheap.",
+  "probes": [
+    {
+      "id": "arith_add",
+      "category": "arithmetic",
+      "prompt": "Compute 17 + 26. Reply with only the number.",
+      "expected": "43",
+      "match": "regex",
+      "pattern": "\\b43\\b"
+    },
+    {
+      "id": "arith_mul",
+      "category": "arithmetic",
+      "prompt": "Compute 12 * 12. Reply with only the number.",
+      "expected": "144",
+      "match": "regex",
+      "pattern": "\\b144\\b"
+    },
+    {
+      "id": "arith_sub",
+      "category": "arithmetic",
+      "prompt": "Compute 100 - 37. Reply with only the number.",
+      "expected": "63",
+      "match": "regex",
+      "pattern": "\\b63\\b"
+    },
+    {
+      "id": "fact_capital_france",
+      "category": "factual",
+      "prompt": "What is the capital of France? Reply with only the city name.",
+      "expected": "Paris",
+      "match": "regex",
+      "pattern": "(?i)\\bparis\\b"
+    },
+    {
+      "id": "fact_planet",
+      "category": "factual",
+      "prompt": "Which planet is known as the Red Planet? Reply with only the planet name.",
+      "expected": "Mars",
+      "match": "regex",
+      "pattern": "(?i)\\bmars\\b"
+    },
+    {
+      "id": "fact_water",
+      "category": "factual",
+      "prompt": "What is the chemical formula for water? Reply with only the formula.",
+      "expected": "H2O",
+      "match": "regex",
+      "pattern": "(?i)\\bh2?o\\b|h\\u2082o"
+    },
+    {
+      "id": "format_json_pair",
+      "category": "format",
+      "prompt": "Return a JSON object with key \"answer\" whose value is the string \"ok\". Reply with only the JSON.",
+      "expected": "{\"answer\": \"ok\"}",
+      "match": "regex",
+      "pattern": "\\{\\s*\"answer\"\\s*:\\s*\"ok\"\\s*\\}"
+    },
+    {
+      "id": "format_json_number",
+      "category": "format",
+      "prompt": "Return a JSON object with key \"count\" whose value is the number 3. Reply with only the JSON.",
+      "expected": "{\"count\": 3}",
+      "match": "regex",
+      "pattern": "\\{\\s*\"count\"\\s*:\\s*3\\s*\\}"
+    },
+    {
+      "id": "instr_uppercase",
+      "category": "instruction",
+      "prompt": "Reply with exactly the word HELLO in all uppercase letters and nothing else.",
+      "expected": "HELLO",
+      "match": "exact"
+    },
+    {
+      "id": "instr_single_word",
+      "category": "instruction",
+      "prompt": "Respond with exactly the single word: yes",
+      "expected": "yes",
+      "match": "exact"
+    }
+  ]
+}

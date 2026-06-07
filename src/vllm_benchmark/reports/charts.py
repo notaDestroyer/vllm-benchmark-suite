@@ -12,7 +12,7 @@ from __future__ import annotations
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import matplotlib
 
@@ -214,3 +214,318 @@ def visualize_results(
     plt.savefig(filepath, dpi=300, bbox_inches="tight", facecolor="white")
     plt.close()
     return str(filepath)
+
+
+# ------------------------------------------------------------------
+# PR5 — roofline, bottleneck map, quant comparison
+# ------------------------------------------------------------------
+
+#: Stable color per governing-bottleneck primary class.
+_BOTTLENECK_COLORS: Dict[str, str] = {
+    "prefill_compute": "#C73E1D",
+    "decode_weight_bandwidth": "#2E86AB",
+    "decode_kv_bandwidth": "#6A994E",
+    "decode_compute": "#F18F01",
+    "kv_capacity": "#A23B72",
+    "queue": "#BC4B51",
+    "interconnect": "#9467BD",
+    "unknown": "#888888",
+}
+
+
+def plot_roofline(
+    results: List[Dict],
+    model_profile: Optional[Dict],
+    gpu_spec: Optional[Dict],
+    out_path: str,
+) -> str:
+    """Log-log roofline plot with the ridge point and measured points.
+
+    Plots the hardware roofline (bandwidth-bound diagonal + compute-bound
+    ceiling) in (arithmetic intensity, throughput) space, marks the ridge
+    point B*, and overlays measured prefill (compute) and decode
+    (bandwidth) operating points derived from the run.
+
+    Missing/empty data is handled gracefully: the function still saves a
+    placeholder PNG (and never raises).
+
+    Args:
+        results: Per-cell result dicts.
+        model_profile: ``ModelProfile.to_dict()`` (or ``None``).
+        gpu_spec: GPU spec dict with ``hbm_bandwidth_gbps`` /
+            ``peak_flops_tflops`` (or ``None``).
+        out_path: Destination PNG path.
+
+    Returns:
+        The path the PNG was written to.
+    """
+    results = results or []
+    profile = model_profile or {}
+    spec = gpu_spec or {}
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Arithmetic intensity (FLOP/byte)")
+    ax.set_ylabel("Throughput (TFLOP/s)")
+    ax.set_title("Roofline", fontweight="bold")
+    ax.grid(True, which="both", alpha=0.3, linestyle="--")
+
+    hbm = spec.get("hbm_bandwidth_gbps")
+    peak_map = spec.get("peak_flops_tflops") or {}
+    peak_flops = peak_map.get("bf16") or peak_map.get("fp8")
+
+    if hbm and peak_flops and hbm > 0 and peak_flops > 0:
+        # Ridge point: where bandwidth*intensity == peak compute.
+        # bandwidth in TB/s = GB/s / 1000; intensity at ridge = peak / bw.
+        bw_tbs = hbm / 1000.0
+        ridge_oi = peak_flops / bw_tbs
+        oi = np.logspace(np.log10(ridge_oi / 100), np.log10(ridge_oi * 100), 200)
+        roof = np.minimum(bw_tbs * oi, peak_flops)
+        ax.plot(oi, roof, color="#333333", linewidth=2, label="Roofline")
+        ax.axvline(ridge_oi, color="#A23B72", linestyle=":", linewidth=1.5,
+                   label=f"Ridge (B*~{ridge_oi:.0f})")
+        ax.scatter([ridge_oi], [peak_flops], color="#A23B72", zorder=5, s=60)
+
+        # Measured operating points (best-effort, derived from throughput).
+        active = profile.get("active_params")
+        if active:
+            pp_vals = [
+                r.get("prefill_tps_mean") or r.get("prefill_tps") or r.get("prefill_tps_p50")
+                for r in results
+            ]
+            pp = max((v for v in pp_vals if v), default=None)
+            tg = max((r.get("tokens_per_second") for r in results if r.get("tokens_per_second")),
+                     default=None)
+            if pp:
+                # prefill achieved TFLOP/s = 2*active*pp; high intensity (compute).
+                achieved = 2 * active * pp / 1e12
+                ax.scatter([ridge_oi * 4], [achieved], color="#C73E1D", marker="^",
+                           s=90, zorder=6, label="Prefill (compute)")
+            if tg:
+                achieved = 2 * active * tg / 1e12
+                ax.scatter([ridge_oi / 8], [achieved], color="#2E86AB", marker="o",
+                           s=90, zorder=6, label="Decode (bandwidth)")
+        ax.legend(loc="lower right", fontsize=9)
+    else:
+        ax.text(0.5, 0.5, "Insufficient GPU/model data for roofline",
+                transform=ax.transAxes, ha="center", va="center", color="#888888")
+
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return str(out)
+
+
+def bottleneck_grid(
+    bottlenecks: List[Dict],
+) -> tuple[List[int], List[int], List[List[Optional[str]]]]:
+    """Grid the governing bottleneck per (context, concurrency) cell.
+
+    Pure helper (no rendering) so the gridding/coloring logic is unit-
+    testable.  When multiple verdicts share a (context, concurrency) cell
+    (e.g. several prompt types) the most-frequent ``primary`` wins; ties
+    break by the precedence order of :data:`_BOTTLENECK_COLORS`.
+
+    Args:
+        bottlenecks: List of ``BottleneckVerdict.to_dict()`` dicts, each
+            carrying ``cell`` = ``[context, concurrency, prompt_type]`` and
+            ``primary``.
+
+    Returns:
+        ``(contexts, concurrencies, primary_grid)`` where ``primary_grid``
+        is indexed ``[row=context][col=concurrency]`` and holds the primary
+        class string (or ``None`` for an empty cell).
+    """
+    bottlenecks = bottlenecks or []
+    contexts = sorted({
+        v["cell"][0] for v in bottlenecks
+        if v.get("cell") and v["cell"][0] is not None
+    })
+    concurrencies = sorted({
+        v["cell"][1] for v in bottlenecks
+        if v.get("cell") and len(v["cell"]) > 1 and v["cell"][1] is not None
+    })
+
+    precedence = list(_BOTTLENECK_COLORS)
+
+    # Collect primaries per (ctx, conc).
+    buckets: Dict[tuple, List[str]] = {}
+    for v in bottlenecks:
+        cell = v.get("cell")
+        if not cell or len(cell) < 2:
+            continue
+        ctx, conc = cell[0], cell[1]
+        if ctx is None or conc is None:
+            continue
+        buckets.setdefault((ctx, conc), []).append(v.get("primary") or "unknown")
+
+    grid: List[List[Optional[str]]] = []
+    for ctx in contexts:
+        row: List[Optional[str]] = []
+        for conc in concurrencies:
+            primaries = buckets.get((ctx, conc))
+            if not primaries:
+                row.append(None)
+                continue
+            # Most frequent; tie broken by precedence order.
+            counts: Dict[str, int] = {}
+            for p in primaries:
+                counts[p] = counts.get(p, 0) + 1
+            best = max(
+                counts,
+                key=lambda p: (counts[p], -precedence.index(p) if p in precedence else -len(precedence)),
+            )
+            row.append(best)
+        grid.append(row)
+    return contexts, concurrencies, grid
+
+
+def plot_bottleneck_map(
+    bottlenecks: List[Dict],
+    out_path: str,
+) -> str:
+    """Render the context x concurrency governing-bottleneck map.
+
+    Each cell is colored by its governing bottleneck class; the critical
+    batch ``B*`` (from any verdict that carries it) is annotated as a
+    vertical crossover boundary between bandwidth- and compute-bound
+    concurrencies.  Empty/missing input is handled without raising.
+
+    Args:
+        bottlenecks: List of ``BottleneckVerdict.to_dict()`` dicts.
+        out_path: Destination PNG path.
+
+    Returns:
+        The path the PNG was written to.
+    """
+    contexts, concurrencies, grid = bottleneck_grid(bottlenecks)
+
+    fig, ax = plt.subplots(figsize=(max(6, len(concurrencies) * 1.2 + 2),
+                                    max(4, len(contexts) * 0.9 + 2)))
+    ax.set_title("Governing bottleneck map", fontweight="bold")
+
+    if not contexts or not concurrencies:
+        ax.text(0.5, 0.5, "No bottleneck data", transform=ax.transAxes,
+                ha="center", va="center", color="#888888")
+        ax.axis("off")
+        out = Path(out_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        return str(out)
+
+    classes = [c for c in _BOTTLENECK_COLORS if any(
+        c in row for row in grid
+    )]
+    class_idx = {c: i for i, c in enumerate(classes)}
+
+    # Build an integer matrix (-1 for empty) for imshow with a discrete cmap.
+    z = np.full((len(contexts), len(concurrencies)), -1, dtype=float)
+    for r, row in enumerate(grid):
+        for c, primary in enumerate(row):
+            if primary is not None:
+                z[r, c] = class_idx[primary]
+
+    for r in range(len(contexts)):
+        for c in range(len(concurrencies)):
+            primary = grid[r][c]
+            color = _BOTTLENECK_COLORS.get(primary, "#202030") if primary else "#202030"
+            ax.add_patch(plt.Rectangle((c, r), 1, 1, color=color, ec="white", lw=1.5))
+            if primary:
+                ax.text(c + 0.5, r + 0.5, primary.replace("decode_", "d.").replace("_", " "),
+                        ha="center", va="center", fontsize=8, color="white")
+
+    ax.set_xlim(0, len(concurrencies))
+    ax.set_ylim(0, len(contexts))
+    ax.set_xticks([i + 0.5 for i in range(len(concurrencies))])
+    ax.set_xticklabels([str(u) for u in concurrencies])
+    ax.set_yticks([i + 0.5 for i in range(len(contexts))])
+    ax.set_yticklabels([f"{c // 1000}K" if c >= 1000 else str(c) for c in contexts])
+    ax.set_xlabel("Concurrent users")
+    ax.set_ylabel("Context length")
+    ax.invert_yaxis()
+
+    # Annotate the critical batch B* crossover (first verdict that has it).
+    bstar = next(
+        (v.get("critical_batch") for v in (bottlenecks or []) if v.get("critical_batch")),
+        None,
+    )
+    if bstar is not None:
+        # Find the column boundary just past B*.
+        boundary = sum(1 for u in concurrencies if u < bstar)
+        if 0 < boundary < len(concurrencies):
+            ax.axvline(boundary, color="yellow", linestyle="--", linewidth=2)
+            ax.text(boundary, -0.15, f"B*={bstar}", color="black", fontsize=9,
+                    ha="center", va="top")
+
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return str(out)
+
+
+def plot_quant_compare(
+    comparison: Dict,
+    out_path: str,
+) -> str:
+    """Render a quant-comparison chart: tok/s vs VRAM vs quality per run.
+
+    Consumes the output of
+    :func:`vllm_benchmark.analysis.quant_compare.compare_quant_runs`.
+    Draws grouped bars of mean throughput and peak VRAM per run with a
+    quality overlay.  Empty/missing data is handled without raising.
+
+    Args:
+        comparison: The ``compare_quant_runs`` result dict.
+        out_path: Destination PNG path.
+
+    Returns:
+        The path the PNG was written to.
+    """
+    comparison = comparison or {}
+    runs = comparison.get("runs") or []
+
+    fig, ax = plt.subplots(figsize=(max(7, len(runs) * 1.5 + 2), 5))
+    ax.set_title("Quantization comparison", fontweight="bold")
+
+    if not runs:
+        ax.text(0.5, 0.5, "No comparison data", transform=ax.transAxes,
+                ha="center", va="center", color="#888888")
+        ax.axis("off")
+        out = Path(out_path)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(out, dpi=150, bbox_inches="tight", facecolor="white")
+        plt.close(fig)
+        return str(out)
+
+    labels = [r.get("label", "?") for r in runs]
+    tps = [r.get("tokens_per_second_mean") or 0.0 for r in runs]
+    vram = [r.get("peak_mem_mean") or 0.0 for r in runs]
+    quality = [r.get("quality") for r in runs]
+
+    x = np.arange(len(runs))
+    width = 0.35
+    ax.bar(x - width / 2, tps, width, label="tok/s", color="#2E86AB")
+    ax.set_ylabel("Throughput (tok/s)", color="#2E86AB")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=20, ha="right", fontsize=8)
+
+    ax_v = ax.twinx()
+    ax_v.bar(x + width / 2, vram, width, label="peak VRAM", color="#A23B72", alpha=0.7)
+    ax_v.set_ylabel("Peak VRAM", color="#A23B72")
+
+    # Quality overlay (scatter on a 0-1 normalized secondary scale via annotation).
+    for xi, q in zip(x, quality):
+        if q is not None:
+            ax.annotate(f"Q={q:.0f}", (xi, tps[xi]), textcoords="offset points",
+                        xytext=(0, 6), ha="center", fontsize=8, color="#6A994E")
+
+    fig.legend(loc="upper right", fontsize=9)
+    out = Path(out_path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=150, bbox_inches="tight", facecolor="white")
+    plt.close(fig)
+    return str(out)

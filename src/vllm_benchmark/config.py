@@ -85,6 +85,7 @@ class BenchmarkConfig:
     # Connection
     api_url: str = "http://localhost:8000"
     model_name: Optional[str] = None  # Auto-detected if None
+    backend: str = "auto"  # Backend selection: auto|vllm|sglang
 
     # Test matrix
     context_lengths: list[int] = field(default_factory=lambda: [32_000, 64_000, 128_000])
@@ -114,6 +115,27 @@ class BenchmarkConfig:
     # Comparison
     compare_file: Optional[str] = None  # Path to previous results JSON
     prompts_file: Optional[str] = None  # Path to custom prompts JSONL
+
+    # Bottleneck analysis
+    bottleneck_sweep: bool = False  # Run prefill/decode roofline probes
+
+    # Workload selection: auto|generative|embeddings|structured
+    workload: str = "auto"
+
+    # Quality measurement: off|probe|perplexity|kl (own results section)
+    quality: str = "off"
+    quality_ref: Optional[str] = None  # Reference endpoint URL for kl mode
+
+    # Sharing & comparison (PR5)
+    share: bool = False  # Write a copy-paste share_*.md after the run
+    vs_url: Optional[str] = None  # Second endpoint URL for head-to-head A/B
+
+    # AI analyst report (PR6)
+    ai_report: bool = False  # Generate an LLM analyst report after the run
+    report_provider: str = "local"  # local|openai|claude
+    report_llm_url: Optional[str] = None  # Endpoint URL for local/openai providers
+    report_model: Optional[str] = None  # Model name for the report provider
+    report_max_tokens: int = 8000  # Max tokens for the report generation
 
     @property
     def api_endpoint(self) -> str:

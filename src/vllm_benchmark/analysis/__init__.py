@@ -1,8 +1,22 @@
 """Analysis and diagnostics components."""
 
+from vllm_benchmark.analysis.advisor import Advisory, build_advisory
+from vllm_benchmark.analysis.bottleneck import BottleneckVerdict, classify_run
 from vllm_benchmark.analysis.diagnostics import DiagnosticEngine
+from vllm_benchmark.analysis.model_intel import ModelProfile, build_profile
 from vllm_benchmark.analysis.publish import create_result_entry
 from vllm_benchmark.analysis.regression import RegressionDetector
 from vllm_benchmark.analysis.scoring import VLLMScore
 
-__all__ = ["DiagnosticEngine", "VLLMScore", "RegressionDetector", "create_result_entry"]
+__all__ = [
+    "DiagnosticEngine",
+    "VLLMScore",
+    "RegressionDetector",
+    "create_result_entry",
+    "ModelProfile",
+    "build_profile",
+    "BottleneckVerdict",
+    "classify_run",
+    "Advisory",
+    "build_advisory",
+]

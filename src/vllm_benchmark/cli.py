@@ -33,7 +33,7 @@ from vllm_benchmark.config import (
 from vllm_benchmark.core.async_engine import run_benchmark
 from vllm_benchmark.core.benchmark import warmup_model
 from vllm_benchmark.core.metrics import GPUMonitor
-from vllm_benchmark.core.server import SystemInfo, VLLMServerInfo
+from vllm_benchmark.core.server import SystemInfo
 from vllm_benchmark.reports.terminal import (
     create_live_dashboard,
 )
@@ -146,6 +146,8 @@ Examples:
     conn = parser.add_argument_group("Connection")
     conn.add_argument("--url", default="http://localhost:8000", help="vLLM server URL (default: http://localhost:8000)")
     conn.add_argument("--model", default=None, help="Model name override (auto-detected if omitted)")
+    conn.add_argument("--backend", choices=["auto", "vllm", "sglang"], default="auto",
+                      help="Inference backend (default: auto-detect)")
 
     # Presets
     presets = parser.add_argument_group("Presets")
@@ -194,8 +196,285 @@ Examples:
     # Comparison
     comp = parser.add_argument_group("Comparison")
     comp.add_argument("--compare", default=None, metavar="FILE", help="Compare with previous results JSON for regression detection")
+    comp.add_argument("--compare-quants", nargs="+", default=None, metavar="FILE",
+                      help="Compare multiple result JSON files across quantizations/models (Holm-corrected)")
+    comp.add_argument("--vs", default=None, metavar="URL2",
+                      help="Run the same matrix against a second endpoint and report a head-to-head A/B")
+
+    # Sharing
+    share = parser.add_argument_group("Sharing")
+    share.add_argument("--share", action="store_true",
+                       help="Write a copy-paste Markdown summary (share_*.md) after the run")
+
+    # Analysis
+    analysis = parser.add_argument_group("Analysis")
+    analysis.add_argument("--bottleneck-sweep", action="store_true",
+                          help="Run prefill/decode roofline probes to find the empirical critical batch")
+
+    report = parser.add_argument_group("AI analyst report")
+    report.add_argument("--ai-report", action="store_true",
+                        help="Generate an LLM analyst report from the run's computed facts (off by default)")
+    report.add_argument("--report-provider", choices=["local", "openai", "claude"], default="local",
+                        help="Report LLM provider: local (benchmarked server)|openai (OpenAI-compatible URL)|claude")
+    report.add_argument("--report-llm-url", default=None, metavar="URL",
+                        help="LLM endpoint URL for the local/openai report providers")
+    report.add_argument("--report-model", default=None, metavar="NAME",
+                        help="Model name for the report provider (Claude defaults to claude-opus-4-8)")
+    report.add_argument("--report-max-tokens", type=int, default=8000,
+                        help="Max tokens for report generation (default: 8000)")
+
+    workload = parser.add_argument_group("Workload")
+    workload.add_argument("--workload", choices=["auto", "generative", "embeddings", "structured"],
+                          default="auto",
+                          help="Workload to run: auto (pick by server task/model)|generative|embeddings|structured")
+
+    quality = parser.add_argument_group("Quality")
+    quality.add_argument("--quality", choices=["off", "probe", "perplexity", "kl"],
+                         default="off",
+                         help="Quality measurement mode (own results section): off|probe|perplexity|kl (default: off)")
+    quality.add_argument("--quality-ref", default=None, metavar="URL",
+                         help="Reference endpoint URL for --quality kl comparison")
 
     return parser
+
+
+# ------------------------------------------------------------------
+# Non-generative workload runner
+# ------------------------------------------------------------------
+
+def _run_non_generative_workloads(
+    workloads: list,
+    config: BenchmarkConfig,
+    model_name: str,
+    backend_server_info,
+    server_info: dict,
+    system_info: dict,
+) -> None:
+    """Run embeddings/structured workloads and write their JSON output.
+
+    Each selected workload is executed via its async ``run``; the per-cell
+    results and ``summarize`` metrics are saved alongside an application-
+    fitness assessment (so e.g. a structured run grades the
+    ``structured_output_fc`` profile).
+    """
+    import asyncio
+
+    from vllm_benchmark.analysis.advisor import build_advisory
+    from vllm_benchmark.reports.charts import ensure_output_directory, sanitize_filename
+
+    profile_metrics: dict = {}
+    all_cells: list[dict] = []
+    summaries: dict = {}
+
+    for wl in workloads:
+        console.print(f"\n[bold yellow]Running '{wl.name}' workload...[/bold yellow]")
+        try:
+            cells = asyncio.run(
+                wl.run(config, model_name, server_info=backend_server_info)
+            )
+        except Exception as exc:  # never fatal
+            console.print(f"[red]Workload '{wl.name}' failed: {exc}[/red]")
+            continue
+        summary = wl.summarize(cells)
+        summaries[wl.name] = summary
+        profile_metrics[wl.name] = summary
+        all_cells.extend(cells)
+        console.print(f"  [green]{wl.name}[/green]: {summary}")
+
+    # Build advisory + fitness from whatever workloads ran.
+    try:
+        from vllm_benchmark.analysis.model_intel import build_profile, match_gpu_spec
+
+        model_profile = build_profile(backend_server_info)
+        gpu_spec = match_gpu_spec(system_info.get("gpu_name"))
+        advisory = build_advisory(
+            all_cells, model_profile, backend_server_info, gpu_spec,
+            profile_metrics=profile_metrics,
+        )
+        advisory_dict = advisory.to_dict()
+        if advisory_dict.get("fitness", {}).get("verdict"):
+            console.print(f"\n[bold]Fitness:[/bold] {advisory_dict['fitness']['verdict']}")
+    except Exception as exc:  # analysis is best-effort
+        console.print(f"[dim]Fitness analysis skipped: {exc}[/dim]")
+        advisory_dict = None
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_model = sanitize_filename(model_name)
+    output_path = ensure_output_directory(config.output_dir)
+
+    metadata = {
+        "schema_version": "4.0",
+        "timestamp": timestamp,
+        "system_info": system_info,
+        "server_info": server_info,
+        "workloads": list(summaries.keys()),
+        "workload_summaries": summaries,
+        "advisory": advisory_dict,
+    }
+    results_package = {"metadata": metadata, "results": all_cells}
+    json_file = output_path / f"benchmark_{safe_model}_{timestamp}.json"
+    with open(json_file, "w") as f:
+        json.dump(results_package, f, indent=2, default=str)
+    console.print(f"\n[bold green]Workload run complete.[/bold green] Results: {json_file}")
+
+
+# ------------------------------------------------------------------
+# Quant comparison (standalone, thin orchestration over the tested core)
+# ------------------------------------------------------------------
+
+def _markdown_to_html(markdown: str) -> str:
+    """Render report Markdown as escaped, readable HTML for the report card.
+
+    The PR5 HTML hook inserts ``metadata["analyst_report"]`` verbatim, so the
+    Markdown is HTML-escaped (untrusted model/hardware names are carried as
+    data) and wrapped in a ``<pre>`` block to preserve structure without
+    pulling in a Markdown dependency.
+    """
+    import html
+
+    escaped = html.escape(markdown)
+    return f'<pre style="white-space:pre-wrap;font-family:inherit;margin:0">{escaped}</pre>'
+
+
+def _generate_ai_report(config, all_results, metadata, score, output_path, safe_model, timestamp) -> None:
+    """Generate the AI analyst report, wire it into metadata, and persist it.
+
+    Never raises: :func:`generate_report` itself never raises, and any
+    file/IO issue here is reported but non-fatal.  Populates
+    ``metadata["analyst_report"]`` (so the HTML hook renders it), writes a
+    ``report_*.md`` file, and prints a short terminal summary.
+    """
+    from vllm_benchmark.analysis.report import generate_report
+
+    console.print("\n[yellow]Generating AI analyst report...[/yellow]")
+    params: dict = {"max_tokens": config.report_max_tokens}
+    if config.report_provider == "local":
+        params["url"] = config.report_llm_url or config.api_url
+    elif config.report_llm_url:
+        params["url"] = config.report_llm_url
+    if config.report_model:
+        params["model"] = config.report_model
+    if getattr(config, "seed", None) is not None:
+        params["seed"] = config.seed
+
+    report = generate_report(
+        all_results, metadata,
+        provider=config.report_provider, score=score, **params,
+    )
+
+    # Wire into metadata so the HTML hook renders the analyst section.
+    metadata["analyst_report"] = _markdown_to_html(report.markdown)
+    metadata["analyst_report_meta"] = report.to_dict()
+
+    # Persist the Markdown report.
+    try:
+        report_file = output_path / f"report_{safe_model}_{timestamp}.md"
+        report_file.write_text(report.markdown, encoding="utf-8")
+        console.print(f"  [green]Report:[/green] {report_file}")
+    except OSError as exc:
+        console.print(f"[red]Could not write report file: {exc}[/red]")
+
+    origin = "LLM-generated" if report.generated else "deterministic fallback"
+    console.print(f"  [dim]Analyst report ({config.report_provider}, {origin})[/dim]")
+    if report.verification is not None:
+        v = report.verification
+        console.print(
+            f"  [dim]Verified {v['checked']} numbers; "
+            f"{len(v['unsupported'])} unsupported.[/dim]"
+        )
+
+
+def _run_compare_quants(paths: list[str], output_dir: str) -> None:
+    """Load result JSONs, run the quant comparison and render a chart.
+
+    Orchestration is intentionally thin — the analysis core
+    (:func:`compare_quant_runs`) is the tested unit; this loads files,
+    prints the ranking and saves a comparison chart.
+    """
+    from vllm_benchmark.analysis.quant_compare import compare_quant_runs
+    from vllm_benchmark.reports.charts import ensure_output_directory, plot_quant_compare
+
+    runs: list[dict] = []
+    for p in paths:
+        try:
+            with open(p) as f:
+                runs.append(json.load(f))
+        except Exception as exc:
+            console.print(f"[red]Failed to load {p}: {exc}[/red]")
+    if len(runs) < 2:
+        console.print("[red]Need at least two result JSON files to compare.[/red]")
+        return
+
+    comparison = compare_quant_runs(runs)
+    console.print("\n[bold]Quant comparison ranking (by throughput):[/bold]")
+    for i, label in enumerate(comparison["ranking"], 1):
+        console.print(f"  {i}. {label}")
+
+    out = ensure_output_directory(output_dir)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    chart = plot_quant_compare(comparison, str(out / f"quant_compare_{ts}.png"))
+    json_path = out / f"quant_compare_{ts}.json"
+    with open(json_path, "w") as f:
+        json.dump(comparison, f, indent=2, default=str)
+    console.print(f"\n[green]Chart:[/green] {chart}")
+    console.print(f"[green]JSON:[/green]  {json_path}")
+
+
+# ------------------------------------------------------------------
+# Head-to-head A/B (thin orchestration over the tested core)
+# ------------------------------------------------------------------
+
+def _run_head_to_head(
+    config: BenchmarkConfig,
+    args,
+    model_name: str,
+    results_a: list[dict],
+    meta_a: dict,
+) -> None:
+    """Run the same matrix against ``config.vs_url`` and report a head-to-head.
+
+    Orchestration is intentionally thin — the analysis core
+    (:func:`head_to_head`) is the tested unit.  Re-runs the identical
+    matrix against the second endpoint, then prints per-metric win counts
+    and saves the comparison JSON.
+    """
+    from vllm_benchmark.analysis.head_to_head import head_to_head
+    from vllm_benchmark.reports.charts import ensure_output_directory
+
+    # Re-run the matrix against the second endpoint (reuse the run path).
+    config_b = BenchmarkConfig(
+        api_url=config.vs_url,
+        output_dir=config.output_dir,
+        streaming=config.streaming,
+        context_lengths=config.context_lengths,
+        concurrency_levels=config.concurrency_levels,
+        output_tokens=config.output_tokens,
+        prompt_types=config.prompt_types,
+    )
+    results_b: list[dict] = []
+    for pt in config_b.prompt_types:
+        for ctx in config_b.context_lengths:
+            for users in config_b.concurrency_levels:
+                cell = run_benchmark(ctx, users, config_b, model_name=model_name, prompt_type=pt)
+                if cell:
+                    results_b.append(cell)
+
+    meta_b = {"server_info": {"model_name": model_name, "backend": "endpoint_b"}}
+    comparison = head_to_head(results_a, meta_a, results_b, meta_b)
+
+    console.print("\n[bold]Head-to-head per-metric win counts:[/bold]")
+    for metric, counts in comparison["summary"].items():
+        console.print(
+            f"  {metric}: {comparison['label_a']}={counts['a']} "
+            f"{comparison['label_b']}={counts['b']} ties={counts['tie']}"
+        )
+
+    out = ensure_output_directory(config.output_dir)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    json_path = out / f"head_to_head_{ts}.json"
+    with open(json_path, "w") as f:
+        json.dump(comparison, f, indent=2, default=str)
+    console.print(f"  [green]JSON:[/green] {json_path}")
 
 
 # ------------------------------------------------------------------
@@ -206,6 +485,11 @@ def main():
     """Main CLI entry point for vllm-bench."""
     parser = build_parser()
     args = parser.parse_args()
+
+    # ---- Standalone quant comparison (no server run needed) ----
+    if args.compare_quants:
+        _run_compare_quants(args.compare_quants, args.output_dir)
+        sys.exit(0)
 
     # Build config
     config = BenchmarkConfig(api_url=args.url, output_dir=args.output_dir, streaming=not args.no_streaming)
@@ -244,6 +528,7 @@ def main():
 
     if args.model:
         config.model_name = args.model
+    config.backend = args.backend
     config.warmup = not args.no_warmup
     config.generate_html = not args.no_html
     config.generate_charts = not args.no_charts
@@ -258,6 +543,17 @@ def main():
         np.random.seed(args.seed)
     if args.compare:
         config.compare_file = args.compare
+    config.bottleneck_sweep = args.bottleneck_sweep
+    config.share = args.share
+    config.vs_url = args.vs
+    config.workload = args.workload
+    config.quality = args.quality
+    config.quality_ref = args.quality_ref
+    config.ai_report = args.ai_report
+    config.report_provider = args.report_provider
+    config.report_llm_url = args.report_llm_url
+    config.report_model = args.report_model
+    config.report_max_tokens = args.report_max_tokens
 
     # ---- Header ----
     console.print(Panel.fit(
@@ -268,8 +564,19 @@ def main():
     # ---- System detection ----
     console.print("\n[yellow]Detecting system...[/yellow]")
     system_info = SystemInfo.get_system_info()
-    console.print("[yellow]Querying vLLM server...[/yellow]")
-    server_info = VLLMServerInfo.get_server_info(config)
+
+    # ---- Backend detection ----
+    from vllm_benchmark.core.backends import detect_backend
+
+    forced = None if config.backend == "auto" else config.backend
+    backend = detect_backend(config.api_url, forced=forced)
+    console.print(f"[yellow]Backend:[/yellow] [bold]{backend.name}[/bold]")
+
+    console.print("[yellow]Querying server...[/yellow]")
+    backend_server_info = backend.server_info(config)
+    server_info = backend_server_info.to_dict()
+    # Expose the historical "version" key expected by reports/environment.
+    server_info.setdefault("version", backend_server_info.backend_version)
     model_name = config.model_name or server_info.get("model_name") or "unknown"
 
     # ---- Auto-detect GPU cost ----
@@ -391,6 +698,22 @@ def main():
             console.print("[red]Sustained RPS benchmark returned no results.[/red]")
 
         console.print("\n[bold green]Sustained RPS benchmark complete.[/bold green]\n")
+        sys.exit(0)
+
+    # ---- Workload selection ----
+    # Default ("auto" on a generate server) keeps the historical generative
+    # path below.  Non-generative workloads (embeddings/structured, or auto
+    # on an embedding server) run via the uniform Workload interface and
+    # exit early with their own JSON output.
+    from vllm_benchmark.core.workloads import select_workloads
+
+    selected_workloads = select_workloads(backend_server_info, config.workload)
+    non_generative = [w for w in selected_workloads if w.name != "generative"]
+    if non_generative:
+        _run_non_generative_workloads(
+            non_generative, config, model_name, backend_server_info,
+            server_info, system_info,
+        )
         sys.exit(0)
 
     # ---- Warmup ----
@@ -521,7 +844,109 @@ def main():
     from vllm_benchmark.core.server import capture_environment
     environment = capture_environment(server_info)
 
+    # ---- Model intelligence, roofline & bottleneck analysis ----
+    model_profile_dict = None
+    bottleneck_dicts: list[dict] = []
+    advisory_dict = None
+    try:
+        from vllm_benchmark.analysis.advisor import build_advisory
+        from vllm_benchmark.analysis.bottleneck import classify_run
+        from vllm_benchmark.analysis.model_intel import (
+            build_profile,
+            critical_batch,
+            match_gpu_spec,
+            mbu,
+            mfu,
+        )
+
+        profile = build_profile(backend_server_info)
+        gpu_spec = match_gpu_spec(system_info.get("gpu_name"))
+        model_profile_dict = profile.to_dict()
+
+        verdicts = classify_run(reporting_results, profile, gpu_spec)
+        bottleneck_dicts = [v.to_dict() for v in verdicts]
+
+        # Single-user roofline summary for the advisory explanation.
+        single = next((r for r in reporting_results if r.get("concurrent_users") == 1), None)
+        run_mbu = run_mfu = None
+        if single and gpu_spec and profile.active_params:
+            from vllm_benchmark.analysis.model_intel import bytes_per_param
+            bpp = bytes_per_param(server_info.get("quantization"))
+            run_mbu = mbu(
+                single.get("decode_tps_mean") or single.get("decode_tps_p50"),
+                profile.active_params, profile.kv_bytes_per_token,
+                single.get("context_length"), gpu_spec.get("hbm_bandwidth_gbps"), bpp,
+            )
+            peak = gpu_spec.get("peak_flops_tflops", {}).get("bf16")
+            run_mfu = mfu(single.get("prefill_tps_mean"), profile.active_params, peak)
+
+        advisory = build_advisory(
+            reporting_results, profile, backend_server_info, gpu_spec,
+            mbu=run_mbu, mfu=run_mfu,
+        )
+        advisory_dict = advisory.to_dict()
+
+        # Optional empirical critical-batch sweep.
+        if config.bottleneck_sweep:
+            import asyncio as _asyncio
+
+            from vllm_benchmark.core.async_engine import run_decode_probe, run_prefill_probe
+            console.print("\n[yellow]Running bottleneck roofline probes...[/yellow]")
+            batch_sizes = config.concurrency_levels or [1, 4, 8, 16]
+            ctx0 = config.context_lengths[0] if config.context_lengths else 32000
+            try:
+                prefill_probe = _asyncio.run(
+                    run_prefill_probe(config, model_name, ctx0, batch_sizes)
+                )
+                decode_probe = _asyncio.run(
+                    run_decode_probe(config, model_name, batch_sizes)
+                )
+                advisory_dict["bottleneck_sweep"] = {
+                    "prefill_probe": prefill_probe,
+                    "decode_probe": decode_probe,
+                    "analytic_critical_batch": critical_batch(
+                        (gpu_spec or {}).get("peak_flops_tflops", {}).get("bf16"),
+                        (gpu_spec or {}).get("hbm_bandwidth_gbps"),
+                        2.0,
+                    ) if gpu_spec else None,
+                }
+            except Exception as exc:  # never fatal
+                console.print(f"[red]Bottleneck sweep failed: {exc}[/red]")
+
+        # Concise terminal summary of the top findings.
+        if bottleneck_dicts:
+            top = max(bottleneck_dicts, key=lambda v: v.get("confidence") == "high")
+            console.print(
+                f"\n[bold]Bottleneck:[/bold] {top['primary']} "
+                f"(confidence {top['confidence']}) -> {top['lever']}"
+            )
+        if advisory_dict and advisory_dict.get("tips"):
+            console.print("[bold]Config tips:[/bold]")
+            for tip in advisory_dict["tips"]:
+                console.print(f"  - {tip}")
+    except Exception as exc:  # analysis is best-effort, never fatal
+        console.print(f"[dim]Model/bottleneck analysis skipped: {exc}[/dim]")
+
+    # ---- Quality measurement (own section; never folded into perf score) ----
+    quality_section = None
+    if config.quality != "off":
+        console.print(f"\n[bold yellow]Running quality measurement ({config.quality})...[/bold yellow]")
+        try:
+            from vllm_benchmark.analysis.quality import run_quality
+            quality_section = run_quality(
+                config.quality, config, backend_server_info, ref_url=config.quality_ref,
+            )
+            status = quality_section.get("status")
+            if status == "ok" and config.quality == "probe":
+                console.print(f"  [green]Quality probe score:[/green] {quality_section.get('score')}/100")
+            elif status == "skipped":
+                console.print(f"  [dim]Quality skipped: {quality_section.get('reason')}[/dim]")
+        except Exception as exc:  # quality is best-effort, never fatal
+            console.print(f"[red]Quality measurement failed: {exc}[/red]")
+            quality_section = {"mode": config.quality, "status": "error", "reason": str(exc)}
+
     metadata = {
+        "schema_version": "4.0",
         "timestamp": timestamp,
         "benchmark_duration": total_time,
         "system_info": system_info,
@@ -536,6 +961,10 @@ def main():
             "iterations": iterations,
             "seed": args.seed,
         },
+        "model_profile": model_profile_dict,
+        "bottlenecks": bottleneck_dicts,
+        "advisory": advisory_dict,
+        "quality": quality_section,
     }
 
     results_package = {"metadata": metadata, "results": all_results}
@@ -554,6 +983,10 @@ def main():
 
     console.print(f"\n{'=' * 80}")
     console.print(Panel(scorer.format_score_display(score), title="[bold]vLLM Benchmark Score[/bold]", border_style="cyan"))
+
+    # ---- AI analyst report ----
+    if config.ai_report:
+        _generate_ai_report(config, all_results, metadata, score, output_path, safe_model, timestamp)
 
     # ---- Publish result ----
     from vllm_benchmark.analysis.publish import create_result_entry, save_result
@@ -622,6 +1055,19 @@ def main():
         summary_table.add_row("Cost / 1M tokens", f"${best_cost:.4f}", "Best configuration")
     console.print(summary_table)
 
+    # ---- Analysis panels (model intel / bottleneck / fitness) ----
+    from vllm_benchmark.reports.terminal import (
+        render_bottleneck_panel,
+        render_fitness_panel,
+        render_model_intel_panel,
+    )
+    if model_profile_dict:
+        console.print(render_model_intel_panel(model_profile_dict))
+    if bottleneck_dicts:
+        console.print(render_bottleneck_panel(bottleneck_dicts))
+    if advisory_dict and advisory_dict.get("fitness"):
+        console.print(render_fitness_panel(advisory_dict["fitness"]))
+
     # ---- Charts ----
     if config.generate_charts:
         console.print("\n[yellow]Generating charts...[/yellow]")
@@ -635,6 +1081,30 @@ def main():
         from vllm_benchmark.reports.html_report import generate_html_report
         html_file = generate_html_report(all_results, metadata, score, diagnostics, config.output_dir)
         console.print(f"  [green]HTML:[/green] {html_file}")
+
+    # ---- Share markdown + result card ----
+    if config.share:
+        from vllm_benchmark.reports.share import build_share_markdown, save_share_markdown
+        md = build_share_markdown(reporting_results, metadata, score)
+        share_file = save_share_markdown(md, config.output_dir)
+        console.print(f"  [green]Share:[/green] {share_file}")
+        try:
+            from pathlib import Path
+
+            from vllm_benchmark.reports.card import render_result_card
+            card_path = str(Path(config.output_dir) / "result_card.png")
+            card_file = render_result_card(reporting_results, metadata, score, out_path=card_path)
+            console.print(f"  [green]Card:[/green] {card_file}")
+        except Exception as exc:  # rendering must never break the run
+            console.print(f"  [yellow]Result card skipped:[/yellow] {exc}")
+
+    # ---- Head-to-head A/B (--vs) ----
+    if config.vs_url:
+        console.print(f"\n[yellow]Running head-to-head against {config.vs_url}...[/yellow]")
+        try:
+            _run_head_to_head(config, args, model_name, reporting_results, metadata)
+        except Exception as exc:  # never fatal
+            console.print(f"[red]Head-to-head failed: {exc}[/red]")
 
     # ---- Regression detection ----
     if config.compare_file:

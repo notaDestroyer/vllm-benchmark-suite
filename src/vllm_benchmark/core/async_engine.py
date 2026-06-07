@@ -43,6 +43,127 @@ def calculate_percentiles(values: List[float]) -> Dict[str, float]:
 
 
 # ------------------------------------------------------------------
+# Streaming SSE parsing (pure, unit-testable)
+# ------------------------------------------------------------------
+
+def parse_streaming_chunks(
+    events: List["tuple[float, str]"],
+    t_send: float,
+    request_id: int = 0,
+) -> Dict:
+    """Parse a sequence of timed SSE lines into request metrics.
+
+    This is a pure function — it takes already-received SSE lines paired
+    with the monotonic ``time.perf_counter()`` timestamp at which each
+    line arrived, and computes timing/throughput metrics without any
+    network I/O.  It is the single source of truth for streaming
+    prefill/decode (pp/tg) accounting and is unit-tested directly.
+
+    Args:
+        events: List of ``(perf_counter_time, raw_line)`` tuples in
+            arrival order.  ``raw_line`` is the decoded, stripped SSE
+            line (e.g. ``"data: {...}"`` or ``"data: [DONE]"``).
+        t_send: ``time.perf_counter()`` captured immediately before the
+            request was sent.
+        request_id: The request identifier to embed in the result.
+
+    Returns:
+        A result dict with timing fields.  ``prefill_tps`` / ``decode_tps``
+        are ``None`` when they cannot be derived; ``pp_tg_source`` is
+        ``"client_stream"``.
+    """
+    first_content_time: Optional[float] = None
+    last_content_time: Optional[float] = None
+    content_times: list[float] = []
+    completion_tokens = 0
+    prompt_tokens = 0
+
+    for now, line in events:
+        if not line or not line.startswith("data: "):
+            continue
+
+        payload = line[6:]
+        if payload.strip() == "[DONE]":
+            break
+
+        try:
+            chunk = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+
+        if "usage" in chunk and chunk["usage"]:
+            usage = chunk["usage"]
+            prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
+            completion_tokens = usage.get("completion_tokens", completion_tokens)
+
+        choices = chunk.get("choices", [])
+        if not choices:
+            continue
+
+        delta = choices[0].get("delta", {})
+        content = delta.get("content")
+
+        if content is not None:
+            content_times.append(now)
+            if first_content_time is None:
+                first_content_time = now
+            last_content_time = now
+
+    # Duration is measured from send to the last observed event (or send
+    # time if nothing arrived).
+    last_event_time = events[-1][0] if events else t_send
+    duration = last_event_time - t_send
+
+    # TTFT — time to first content chunk.
+    ttft = (first_content_time - t_send) if first_content_time is not None else None
+
+    # Inter-token latency over content chunks.
+    if len(content_times) >= 2:
+        inter_times = [content_times[i] - content_times[i - 1] for i in range(1, len(content_times))]
+        avg_itl: Optional[float] = mean(inter_times)
+    else:
+        avg_itl = None
+
+    if completion_tokens == 0:
+        completion_tokens = len(content_times)
+
+    # Prefill throughput: prompt tokens consumed during the prefill phase
+    # (== time to first token).
+    if ttft is not None and ttft > 0 and prompt_tokens > 0:
+        prefill_tps: Optional[float] = prompt_tokens / ttft
+    else:
+        prefill_tps = None
+
+    # Decode throughput: completion tokens emitted after the first content
+    # chunk, requires at least two content chunks to define an interval.
+    if (
+        first_content_time is not None
+        and last_content_time is not None
+        and len(content_times) >= 2
+        and completion_tokens >= 2
+    ):
+        decode_window = last_content_time - first_content_time
+        decode_tps: Optional[float] = (completion_tokens - 1) / decode_window if decode_window > 0 else None
+    else:
+        decode_tps = None
+
+    return {
+        "request_id": request_id,
+        "duration": duration,
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "inter_token_latency": avg_itl,
+        "ttft": ttft,
+        "prefill_tps": prefill_tps,
+        "decode_tps": decode_tps,
+        "pp_tg_source": "client_stream",
+        "success": True,
+        "streaming": True,
+    }
+
+
+# ------------------------------------------------------------------
 # Async request executors
 # ------------------------------------------------------------------
 
@@ -55,7 +176,12 @@ async def _async_streaming_request(
     api_endpoint: str,
     request_timeout: int,
 ) -> Dict:
-    """Async streaming request measuring true TTFT via SSE chunks."""
+    """Async streaming request measuring true TTFT via SSE chunks.
+
+    Collects each SSE line together with the monotonic
+    ``time.perf_counter()`` at which it arrived, then delegates all metric
+    derivation to :func:`parse_streaming_chunks`.
+    """
     data = {
         "model": model_name,
         "messages": [{"role": "user", "content": prompt}],
@@ -65,80 +191,23 @@ async def _async_streaming_request(
     }
 
     try:
-        start = time.time()
+        start = time.perf_counter()
         timeout = aiohttp.ClientTimeout(total=request_timeout)
         async with session.post(api_endpoint, json=data, timeout=timeout) as response:
             if response.status != 200:
                 return {
                     "request_id": request_id,
-                    "duration": time.time() - start,
+                    "duration": time.perf_counter() - start,
                     "success": False,
                     "error": f"HTTP {response.status}",
                 }
 
-            first_token_time = None
-            chunk_times: list[float] = []
-            completion_tokens = 0
-            prompt_tokens = 0
-
+            events: list[tuple[float, str]] = []
             async for raw_line in response.content:
                 line = raw_line.decode("utf-8").strip()
-                if not line or not line.startswith("data: "):
-                    continue
+                events.append((time.perf_counter(), line))
 
-                payload = line[6:]
-                if payload.strip() == "[DONE]":
-                    break
-
-                try:
-                    chunk = json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-
-                now = time.time()
-
-                if "usage" in chunk:
-                    usage = chunk["usage"]
-                    prompt_tokens = usage.get("prompt_tokens", prompt_tokens)
-                    completion_tokens = usage.get("completion_tokens", completion_tokens)
-
-                choices = chunk.get("choices", [])
-                if not choices:
-                    continue
-
-                delta = choices[0].get("delta", {})
-                content = delta.get("content")
-
-                if content is not None:
-                    chunk_times.append(now)
-                    if first_token_time is None:
-                        first_token_time = now
-
-            duration = time.time() - start
-            ttft = (first_token_time - start) if first_token_time else duration * 0.15
-
-            if len(chunk_times) >= 2:
-                inter_times = [chunk_times[i] - chunk_times[i - 1] for i in range(1, len(chunk_times))]
-                avg_itl = mean(inter_times)
-            else:
-                avg_itl = duration / max(completion_tokens, 1)
-
-            if completion_tokens == 0:
-                completion_tokens = len(chunk_times)
-
-            return {
-                "request_id": request_id,
-                "duration": duration,
-                "prompt_tokens": prompt_tokens,
-                "completion_tokens": completion_tokens,
-                "total_tokens": prompt_tokens + completion_tokens,
-                "inter_token_latency": avg_itl,
-                "ttft": ttft,
-                "prefill_time_estimate": ttft,
-                "decode_time_estimate": duration - ttft,
-                "success": True,
-                "streaming": True,
-            }
+            return parse_streaming_chunks(events, start, request_id)
 
     except Exception as e:
         return {"request_id": request_id, "success": False, "error": str(e)}
@@ -162,10 +231,10 @@ async def _async_batch_request(
     }
 
     try:
-        start = time.time()
+        start = time.perf_counter()
         timeout = aiohttp.ClientTimeout(total=request_timeout)
         async with session.post(api_endpoint, json=data, timeout=timeout) as response:
-            duration = time.time() - start
+            duration = time.perf_counter() - start
 
             if response.status == 200:
                 result = await response.json()
@@ -173,10 +242,10 @@ async def _async_batch_request(
                 prompt_tokens = usage.get("prompt_tokens", 0)
                 completion_tokens = usage.get("completion_tokens", 0)
 
-                itl = duration / completion_tokens if completion_tokens > 0 else 0
-                prefill_estimate = duration * 0.15
-                decode_estimate = duration - prefill_estimate
+                itl = duration / completion_tokens if completion_tokens > 0 else None
 
+                # Non-streaming requests cannot separate prefill from decode;
+                # do NOT fabricate a split.
                 return {
                     "request_id": request_id,
                     "duration": duration,
@@ -184,9 +253,10 @@ async def _async_batch_request(
                     "completion_tokens": completion_tokens,
                     "total_tokens": usage.get("total_tokens", 0),
                     "inter_token_latency": itl,
-                    "ttft": prefill_estimate,
-                    "prefill_time_estimate": prefill_estimate,
-                    "decode_time_estimate": decode_estimate,
+                    "ttft": None,
+                    "prefill_tps": None,
+                    "decode_tps": None,
+                    "pp_tg_source": "unavailable",
                     "success": True,
                     "streaming": False,
                 }
@@ -226,6 +296,31 @@ async def _make_async_request(
 # Burst mode (replaces old threading approach)
 # ------------------------------------------------------------------
 
+async def _warmup_connection(
+    session: aiohttp.ClientSession,
+    config: BenchmarkConfig,
+    model_name: str,
+) -> None:
+    """Issue a single throwaway request to establish the connection pool.
+
+    Guarded so that any failure is ignored; the warmup request is never
+    counted in the measured results.
+    """
+    try:
+        data = {
+            "model": model_name,
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "temperature": 0.0,
+            "stream": False,
+        }
+        timeout = aiohttp.ClientTimeout(total=config.request_timeout)
+        async with session.post(config.api_endpoint, json=data, timeout=timeout) as response:
+            await response.read()
+    except Exception:
+        pass
+
+
 async def _run_burst(
     prompt: str,
     num_concurrent: int,
@@ -235,6 +330,8 @@ async def _run_burst(
     """Fire all requests simultaneously and collect results."""
     connector = aiohttp.TCPConnector(limit=num_concurrent + 10)
     async with aiohttp.ClientSession(connector=connector) as session:
+        # Connection warmup — establish the pool before the measured burst.
+        await _warmup_connection(session, config, model_name)
         tasks = [
             _make_async_request(
                 session, prompt, i, config.output_tokens, model_name,
@@ -243,6 +340,92 @@ async def _run_burst(
             for i in range(num_concurrent)
         ]
         return await asyncio.gather(*tasks)
+
+
+# ------------------------------------------------------------------
+# Bottleneck roofline probes
+# ------------------------------------------------------------------
+
+async def run_prefill_probe(
+    config: BenchmarkConfig,
+    model_name: str,
+    context_length: int,
+    batch_sizes: List[int],
+    *,
+    prompt_type: str = "classic",
+) -> List[Dict]:
+    """Probe prefill behavior with a long prompt and ``max_tokens=1``.
+
+    Issues one burst per batch size where every request sends a long
+    prompt and requests a single output token, isolating the prefill
+    (compute-bound) phase.  Returns the raw aggregate stats per batch.
+
+    Args:
+        config: Benchmark config (context, endpoint, timeout, streaming).
+        model_name: Model id to send.
+        context_length: Target prompt length in tokens.
+        batch_sizes: Concurrency levels to sweep.
+        prompt_type: Prompt generator to use.
+
+    Returns:
+        A list of per-batch result dicts (``probe == "prefill"``).
+    """
+    prompt_gen = get_prompt_generator(prompt_type)
+    prompt = prompt_gen(context_length, model_name or "")
+    actual_prompt_tokens = count_tokens(prompt, model_name or "")
+    out: list[Dict] = []
+    probe_cfg = BenchmarkConfig(**{**config.__dict__})
+    probe_cfg.output_tokens = 1
+    for batch in batch_sizes:
+        start = time.perf_counter()
+        results = await _run_burst(prompt, batch, probe_cfg, model_name)
+        total_time = time.perf_counter() - start
+        stats = _compute_stats(
+            list(results), total_time, context_length, batch,
+            prompt_type, actual_prompt_tokens, None, None, None,
+        )
+        if stats:
+            stats["probe"] = "prefill"
+            out.append(stats)
+    return out
+
+
+async def run_decode_probe(
+    config: BenchmarkConfig,
+    model_name: str,
+    batch_sizes: List[int],
+    *,
+    decode_tokens: int = 256,
+    prompt_type: str = "classic",
+    short_context: int = 64,
+) -> List[Dict]:
+    """Probe decode behavior with a short prompt and a long output.
+
+    Issues one burst per batch size with a tiny prompt and a long
+    generation, isolating the decode (bandwidth-bound) phase.  Returns
+    the raw aggregate stats per batch.
+
+    Returns:
+        A list of per-batch result dicts (``probe == "decode"``).
+    """
+    prompt_gen = get_prompt_generator(prompt_type)
+    prompt = prompt_gen(short_context, model_name or "")
+    actual_prompt_tokens = count_tokens(prompt, model_name or "")
+    out: list[Dict] = []
+    probe_cfg = BenchmarkConfig(**{**config.__dict__})
+    probe_cfg.output_tokens = decode_tokens
+    for batch in batch_sizes:
+        start = time.perf_counter()
+        results = await _run_burst(prompt, batch, probe_cfg, model_name)
+        total_time = time.perf_counter() - start
+        stats = _compute_stats(
+            list(results), total_time, short_context, batch,
+            prompt_type, actual_prompt_tokens, None, None, None,
+        )
+        if stats:
+            stats["probe"] = "decode"
+            out.append(stats)
+    return out
 
 
 # ------------------------------------------------------------------
@@ -268,11 +451,14 @@ async def _run_sustained_rps(
 
     connector = aiohttp.TCPConnector(limit=int(target_rps * 10) + 50)
     async with aiohttp.ClientSession(connector=connector) as session:
-        start = time.time()
+        # Connection warmup — establish the pool before the measured run.
+        await _warmup_connection(session, config, model_name)
+
+        start = time.perf_counter()
         next_send = start
 
-        while time.time() - start < duration_seconds:
-            now = time.time()
+        while time.perf_counter() - start < duration_seconds:
+            now = time.perf_counter()
             if now >= next_send:
                 task = asyncio.create_task(
                     _make_async_request(
@@ -417,6 +603,30 @@ def _compute_stats(
         result_dict["itl_p95"] = itl_percentiles.get("p95", 0)
         result_dict["itl_p99"] = itl_percentiles.get("p99", 0)
 
+    # Prefill / decode (pp/tg) throughput split — only present when the
+    # client-side streaming parser could derive real per-phase numbers.
+    sources = {r.get("pp_tg_source") for r in successful if r.get("pp_tg_source")}
+    if sources:
+        # If every successful request agrees on a source, surface it; if
+        # they disagree (mixed modes), label as "mixed".
+        result_dict["pp_tg_source"] = sources.pop() if len(sources) == 1 else "mixed"
+
+    prefill_values = [r.get("prefill_tps") for r in successful if r.get("prefill_tps") is not None]
+    if prefill_values:
+        prefill_percentiles = calculate_percentiles(prefill_values)
+        result_dict["prefill_tps_mean"] = mean(prefill_values)
+        result_dict["prefill_tps_p50"] = prefill_percentiles.get("p50", 0)
+        result_dict["prefill_tps_p90"] = prefill_percentiles.get("p90", 0)
+        result_dict["prefill_tps_p99"] = prefill_percentiles.get("p99", 0)
+
+    decode_values = [r.get("decode_tps") for r in successful if r.get("decode_tps") is not None]
+    if decode_values:
+        decode_percentiles = calculate_percentiles(decode_values)
+        result_dict["decode_tps_mean"] = mean(decode_values)
+        result_dict["decode_tps_p50"] = decode_percentiles.get("p50", 0)
+        result_dict["decode_tps_p90"] = decode_percentiles.get("p90", 0)
+        result_dict["decode_tps_p99"] = decode_percentiles.get("p99", 0)
+
     # Cost analysis
     if cost_per_hour is not None and cost_per_hour > 0:
         cost_per_second = cost_per_hour / 3600
@@ -475,13 +685,14 @@ async def run_benchmark_async(
     metrics_monitor = MetricsMonitor(config.metrics_endpoint)
     metrics_monitor.start()
 
-    start_time = time.time()
+    start_time = time.perf_counter()
     results = await _run_burst(prompt, num_concurrent_users, config, model_name)
-    total_time = time.time() - start_time
+    end_time = time.perf_counter()
+    total_time = end_time - start_time
 
     gpu_stats = None
     if not gpu_monitor:
-        gpu_stats = local_monitor.stop()
+        gpu_stats = local_monitor.stop(window_start=start_time, window_end=end_time)
     metrics_stats = metrics_monitor.stop()
 
     return _compute_stats(
@@ -514,13 +725,14 @@ async def run_sustained_benchmark(
     metrics_monitor = MetricsMonitor(config.metrics_endpoint)
     metrics_monitor.start()
 
-    start_time = time.time()
+    start_time = time.perf_counter()
     results = await _run_sustained_rps(
         prompt, target_rps, duration_seconds, config, model_name,
     )
-    total_time = time.time() - start_time
+    end_time = time.perf_counter()
+    total_time = end_time - start_time
 
-    gpu_stats = gpu_monitor.stop()
+    gpu_stats = gpu_monitor.stop(window_start=start_time, window_end=end_time)
     metrics_stats = metrics_monitor.stop()
 
     effective_users = int(target_rps * (mean([r["duration"] for r in results if r.get("success")]) if results else 1))

@@ -1,5 +1,62 @@
 # Changelog
 
+## v4.0.0 - Benchmark & Compare (2026-06-07)
+
+The v4 release turns the suite from a vLLM-only benchmarker into a **model-aware
+benchmark-and-compare** tool that profiles *and* explains performance across vLLM
+and SGLang, with roofline-based bottleneck analysis, a statistics overhaul, and an
+optional AI analyst report. Results JSON now carries `schema_version = "4.0"`.
+
+### Added
+- **Multiple backends** — `--backend auto|vllm|sglang` with auto-detection; SGLang
+  is a first-class target alongside vLLM.
+- **Second console alias** — `llm-bench` is now an entry point alongside `vllm-bench`.
+- **Workload coverage** — `--workload auto|generative|embeddings|structured`. Auto
+  picks the workload from the server task/model; embeddings and structured/function-
+  calling have dedicated runners and metrics.
+- **Model Intelligence** — MoE-vs-dense detection, active/total parameter accounting,
+  GQA/MQA attention grouping, and KV-cache / VRAM math, emitted as `model_profile`.
+- **Roofline & bottleneck engine** — Model Bandwidth Utilization (MBU) and Model
+  FLOPs Utilization (MFU), the critical batch size B*, and per-cell governing-
+  bottleneck classification (`bottlenecks`), plus a config `advisory`. New
+  `--bottleneck-sweep` runs empirical prefill/decode roofline probes to locate the
+  critical batch.
+- **Application fitness** — workload-aware fitness verdict surfaced in the advisory.
+- **Quality measurement** — `--quality off|probe|perplexity|kl` with `--quality-ref`;
+  reported in its own `quality` section and never folded into the performance score.
+  Perplexity/KL modes are backend-gated (require logprob/token-level support).
+- **Statistics overhaul** — BCa bootstrap confidence intervals, Welch's t-test and
+  Mann-Whitney U, Cohen's d and Cliff's delta effect sizes, Holm-Bonferroni multiple-
+  comparison correction, and Wilson intervals for proportions. A "real difference"
+  must be both statistically significant *and* practically significant.
+- **Sharing & comparison** — `--share` writes a copy-paste Reddit/Markdown summary
+  (`share_*.md`); a result card PNG; `--compare-quants FILE...` for Holm-corrected
+  quant/model comparisons; and `--vs URL2` for a vLLM-vs-SGLang head-to-head A/B.
+- **AI analyst report** — `--ai-report` with `--report-provider local|openai|claude`,
+  `--report-llm-url`, `--report-model`, `--report-max-tokens`. All numbers are
+  computed by the tool from the run's facts; the LLM only writes prose; a numeric
+  verifier redacts any figure not present in the data, and on failure the tool falls
+  back to a deterministic report. Optional Claude provider via
+  `pip install vllm-benchmark-suite[report-claude]`.
+
+### Changed
+- **Timing** — switched to `time.perf_counter` throughout and split throughput into
+  measured **prefill** (`prefill_tps`) and **decode** (`decode_tps`) phases instead
+  of a fixed-percentage estimate.
+- **Hardware layer** — refactored NVIDIA hardware detection and added a GPU spec KB
+  (peak FLOPs, HBM bandwidth) used by the roofline math.
+- **Runtime dependencies** — promoted `psutil` from a best-effort import to a hard
+  dependency and declared `huggingface_hub`, `scipy`, and `jsonschema` (all imported
+  at runtime). `anthropic` remains optional under the `report-claude` extra.
+- **Results schema** — metadata now includes `schema_version`, `model_profile`,
+  `bottlenecks`, `advisory`, and `quality`.
+
+### Fixed
+- Statistics now handle empty/degenerate samples without emitting `nan` (CIs and
+  effect sizes degrade gracefully instead of poisoning downstream summaries).
+
+---
+
 ## v3.0.0 - Professional Package (2026-04-16)
 
 ### Breaking Changes
