@@ -33,7 +33,7 @@ from vllm_benchmark.config import (
 from vllm_benchmark.core.async_engine import run_benchmark
 from vllm_benchmark.core.benchmark import warmup_model
 from vllm_benchmark.core.metrics import GPUMonitor
-from vllm_benchmark.core.server import SystemInfo, VLLMServerInfo
+from vllm_benchmark.core.server import SystemInfo
 from vllm_benchmark.reports.terminal import (
     create_live_dashboard,
 )
@@ -146,6 +146,8 @@ Examples:
     conn = parser.add_argument_group("Connection")
     conn.add_argument("--url", default="http://localhost:8000", help="vLLM server URL (default: http://localhost:8000)")
     conn.add_argument("--model", default=None, help="Model name override (auto-detected if omitted)")
+    conn.add_argument("--backend", choices=["auto", "vllm", "sglang"], default="auto",
+                      help="Inference backend (default: auto-detect)")
 
     # Presets
     presets = parser.add_argument_group("Presets")
@@ -244,6 +246,7 @@ def main():
 
     if args.model:
         config.model_name = args.model
+    config.backend = args.backend
     config.warmup = not args.no_warmup
     config.generate_html = not args.no_html
     config.generate_charts = not args.no_charts
@@ -268,8 +271,19 @@ def main():
     # ---- System detection ----
     console.print("\n[yellow]Detecting system...[/yellow]")
     system_info = SystemInfo.get_system_info()
-    console.print("[yellow]Querying vLLM server...[/yellow]")
-    server_info = VLLMServerInfo.get_server_info(config)
+
+    # ---- Backend detection ----
+    from vllm_benchmark.core.backends import detect_backend
+
+    forced = None if config.backend == "auto" else config.backend
+    backend = detect_backend(config.api_url, forced=forced)
+    console.print(f"[yellow]Backend:[/yellow] [bold]{backend.name}[/bold]")
+
+    console.print("[yellow]Querying server...[/yellow]")
+    backend_server_info = backend.server_info(config)
+    server_info = backend_server_info.to_dict()
+    # Expose the historical "version" key expected by reports/environment.
+    server_info.setdefault("version", backend_server_info.backend_version)
     model_name = config.model_name or server_info.get("model_name") or "unknown"
 
     # ---- Auto-detect GPU cost ----

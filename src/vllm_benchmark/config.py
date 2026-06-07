@@ -85,6 +85,7 @@ class BenchmarkConfig:
     # Connection
     api_url: str = "http://localhost:8000"
     model_name: Optional[str] = None  # Auto-detected if None
+    backend: str = "auto"  # Backend selection: auto|vllm|sglang
 
     # Test matrix
     context_lengths: list[int] = field(default_factory=lambda: [32_000, 64_000, 128_000])
