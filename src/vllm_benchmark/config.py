@@ -130,6 +130,13 @@ class BenchmarkConfig:
     share: bool = False  # Write a copy-paste share_*.md after the run
     vs_url: Optional[str] = None  # Second endpoint URL for head-to-head A/B
 
+    # AI analyst report (PR6)
+    ai_report: bool = False  # Generate an LLM analyst report after the run
+    report_provider: str = "local"  # local|openai|claude
+    report_llm_url: Optional[str] = None  # Endpoint URL for local/openai providers
+    report_model: Optional[str] = None  # Model name for the report provider
+    report_max_tokens: int = 8000  # Max tokens for the report generation
+
     @property
     def api_endpoint(self) -> str:
         return f"{self.api_url}/v1/chat/completions"

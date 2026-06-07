@@ -211,6 +211,18 @@ Examples:
     analysis.add_argument("--bottleneck-sweep", action="store_true",
                           help="Run prefill/decode roofline probes to find the empirical critical batch")
 
+    report = parser.add_argument_group("AI analyst report")
+    report.add_argument("--ai-report", action="store_true",
+                        help="Generate an LLM analyst report from the run's computed facts (off by default)")
+    report.add_argument("--report-provider", choices=["local", "openai", "claude"], default="local",
+                        help="Report LLM provider: local (benchmarked server)|openai (OpenAI-compatible URL)|claude")
+    report.add_argument("--report-llm-url", default=None, metavar="URL",
+                        help="LLM endpoint URL for the local/openai report providers")
+    report.add_argument("--report-model", default=None, metavar="NAME",
+                        help="Model name for the report provider (Claude defaults to claude-opus-4-8)")
+    report.add_argument("--report-max-tokens", type=int, default=8000,
+                        help="Max tokens for report generation (default: 8000)")
+
     workload = parser.add_argument_group("Workload")
     workload.add_argument("--workload", choices=["auto", "generative", "embeddings", "structured"],
                           default="auto",
@@ -308,6 +320,68 @@ def _run_non_generative_workloads(
 # ------------------------------------------------------------------
 # Quant comparison (standalone, thin orchestration over the tested core)
 # ------------------------------------------------------------------
+
+def _markdown_to_html(markdown: str) -> str:
+    """Render report Markdown as escaped, readable HTML for the report card.
+
+    The PR5 HTML hook inserts ``metadata["analyst_report"]`` verbatim, so the
+    Markdown is HTML-escaped (untrusted model/hardware names are carried as
+    data) and wrapped in a ``<pre>`` block to preserve structure without
+    pulling in a Markdown dependency.
+    """
+    import html
+
+    escaped = html.escape(markdown)
+    return f'<pre style="white-space:pre-wrap;font-family:inherit;margin:0">{escaped}</pre>'
+
+
+def _generate_ai_report(config, all_results, metadata, score, output_path, safe_model, timestamp) -> None:
+    """Generate the AI analyst report, wire it into metadata, and persist it.
+
+    Never raises: :func:`generate_report` itself never raises, and any
+    file/IO issue here is reported but non-fatal.  Populates
+    ``metadata["analyst_report"]`` (so the HTML hook renders it), writes a
+    ``report_*.md`` file, and prints a short terminal summary.
+    """
+    from vllm_benchmark.analysis.report import generate_report
+
+    console.print("\n[yellow]Generating AI analyst report...[/yellow]")
+    params: dict = {"max_tokens": config.report_max_tokens}
+    if config.report_provider == "local":
+        params["url"] = config.report_llm_url or config.api_url
+    elif config.report_llm_url:
+        params["url"] = config.report_llm_url
+    if config.report_model:
+        params["model"] = config.report_model
+    if getattr(config, "seed", None) is not None:
+        params["seed"] = config.seed
+
+    report = generate_report(
+        all_results, metadata,
+        provider=config.report_provider, score=score, **params,
+    )
+
+    # Wire into metadata so the HTML hook renders the analyst section.
+    metadata["analyst_report"] = _markdown_to_html(report.markdown)
+    metadata["analyst_report_meta"] = report.to_dict()
+
+    # Persist the Markdown report.
+    try:
+        report_file = output_path / f"report_{safe_model}_{timestamp}.md"
+        report_file.write_text(report.markdown, encoding="utf-8")
+        console.print(f"  [green]Report:[/green] {report_file}")
+    except OSError as exc:
+        console.print(f"[red]Could not write report file: {exc}[/red]")
+
+    origin = "LLM-generated" if report.generated else "deterministic fallback"
+    console.print(f"  [dim]Analyst report ({config.report_provider}, {origin})[/dim]")
+    if report.verification is not None:
+        v = report.verification
+        console.print(
+            f"  [dim]Verified {v['checked']} numbers; "
+            f"{len(v['unsupported'])} unsupported.[/dim]"
+        )
+
 
 def _run_compare_quants(paths: list[str], output_dir: str) -> None:
     """Load result JSONs, run the quant comparison and render a chart.
@@ -474,6 +548,11 @@ def main():
     config.workload = args.workload
     config.quality = args.quality
     config.quality_ref = args.quality_ref
+    config.ai_report = args.ai_report
+    config.report_provider = args.report_provider
+    config.report_llm_url = args.report_llm_url
+    config.report_model = args.report_model
+    config.report_max_tokens = args.report_max_tokens
 
     # ---- Header ----
     console.print(Panel.fit(
@@ -902,6 +981,10 @@ def main():
 
     console.print(f"\n{'=' * 80}")
     console.print(Panel(scorer.format_score_display(score), title="[bold]vLLM Benchmark Score[/bold]", border_style="cyan"))
+
+    # ---- AI analyst report ----
+    if config.ai_report:
+        _generate_ai_report(config, all_results, metadata, score, output_path, safe_model, timestamp)
 
     # ---- Publish result ----
     from vllm_benchmark.analysis.publish import create_result_entry, save_result

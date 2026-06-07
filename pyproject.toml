@@ -44,6 +44,7 @@ dev = [
     "hypothesis>=6.0",
     "ruff>=0.4.0",
 ]
+report-claude = ["anthropic>=0.40"]
 
 [project.scripts]
 vllm-bench = "vllm_benchmark.cli:main"
@@ -62,6 +63,7 @@ packages = ["src/vllm_benchmark"]
 "src/vllm_benchmark/data/structured/probes.json" = "vllm_benchmark/data/structured/probes.json"
 "src/vllm_benchmark/data/quality/probes.json" = "vllm_benchmark/data/quality/probes.json"
 "src/vllm_benchmark/data/quality/perplexity_corpus.txt" = "vllm_benchmark/data/quality/perplexity_corpus.txt"
+"src/vllm_benchmark/data/report/system_prompt.md" = "vllm_benchmark/data/report/system_prompt.md"
 
 [tool.ruff]
 target-version = "py310"
