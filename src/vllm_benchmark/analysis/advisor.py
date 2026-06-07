@@ -10,9 +10,9 @@ actionable guidance:
 * configuration tips (MoE expert parallelism, GQA/MQA context headroom,
   FP8 quantization on FP8-capable GPUs, prefix caching).
 
-The eight application-fitness profiles are intentionally **not**
-implemented here — they are a later PR.  :func:`build_advisory` exposes a
-clear extension point (``fitness=None``) for them.
+The eight application-fitness profiles live in
+:mod:`vllm_benchmark.analysis.fitness`; :func:`build_advisory` invokes
+them and populates :attr:`Advisory.fitness`.
 
 Author: amit
 License: MIT
@@ -21,8 +21,9 @@ License: MIT
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
+from vllm_benchmark.analysis.fitness import assess_fitness, fitness_verdict
 from vllm_benchmark.analysis.model_intel import ModelProfile
 
 # ---------------------------------------------------------------------------
@@ -262,8 +263,9 @@ def config_tips(
 class Advisory:
     """Aggregate advisory output for a benchmark run.
 
-    ``fitness`` is reserved for the (later-PR) application-fitness
-    profiles and is always ``None`` here — the explicit extension point.
+    ``fitness`` carries the application-fitness verdicts (a dict with a
+    one-line ``verdict`` and per-profile grades), or ``None`` when fitness
+    could not be assessed.
     """
 
     latency_optimal: Optional[dict] = None
@@ -293,11 +295,26 @@ def build_advisory(
     *,
     mbu: Optional[float] = None,
     mfu: Optional[float] = None,
+    profile_metrics: Optional[dict[str, Any]] = None,
 ) -> Advisory:
     """Assemble a full :class:`Advisory` from a run.
 
     Confidence is taken from the model profile when available
     (``confirmed`` -> high, ``inferred`` -> medium, ``heuristic`` -> low).
+
+    Args:
+        results: Generative result cells from the run.
+        profile: The model profile (or ``None``).
+        server_info: The normalized :class:`ServerInfo`.
+        gpu_spec: Matched GPU spec dict (or ``None``).
+        mbu: Optional measured memory-bandwidth utilization.
+        mfu: Optional measured model-flops utilization.
+        profile_metrics: Optional per-workload summaries keyed by name
+            (e.g. ``{"structured": {...}, "embeddings": {...}}``) used by
+            the application-fitness profiles.
+
+    Returns:
+        A populated :class:`Advisory` with ``fitness`` set.
     """
     points = recommend_operating_points(results)
     top = points.get("throughput_optimal")
@@ -312,10 +329,17 @@ def build_advisory(
             "heuristic": "low",
         }.get(profile.confidence, "medium")
 
+    grades = assess_fitness(results, profile_metrics or {}, server_info, profile)
+    fitness = {
+        "verdict": fitness_verdict(grades),
+        "profiles": {name: grade.to_dict() for name, grade in grades.items()},
+    }
+
     return Advisory(
         latency_optimal=points.get("latency_optimal"),
         throughput_optimal=top,
         explanation=explanation,
         tips=tips,
         confidence=confidence,
+        fitness=fitness,
     )

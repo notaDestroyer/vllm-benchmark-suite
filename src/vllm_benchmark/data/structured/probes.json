@@ -1,0 +1,107 @@
+{
+  "_README": "Small bundled probe set for the StructuredWorkload. Each probe is either a json_schema case (response must be valid JSON validating against `schema`) or a tool_call case (response must select `expected_tool` with the required arguments). Kept intentionally tiny so a run is cheap.",
+  "schema_probes": [
+    {
+      "id": "extract_contact",
+      "prompt": "Extract the contact details from this text as JSON: 'Hi, I'm Jane Doe, you can reach me at jane.doe@example.com or call 555-0142.'",
+      "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+          "name": "contact",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "name": {"type": "string"},
+              "email": {"type": "string"},
+              "phone": {"type": "string"}
+            },
+            "required": ["name", "email"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "schema": {
+        "type": "object",
+        "properties": {
+          "name": {"type": "string"},
+          "email": {"type": "string"},
+          "phone": {"type": "string"}
+        },
+        "required": ["name", "email"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "id": "extract_order",
+      "prompt": "Return JSON describing this order: '2 units of SKU A19 at $4.50 each, ship to ZIP 90210.'",
+      "response_format": {
+        "type": "json_schema",
+        "json_schema": {
+          "name": "order",
+          "schema": {
+            "type": "object",
+            "properties": {
+              "sku": {"type": "string"},
+              "quantity": {"type": "integer"},
+              "unit_price": {"type": "number"},
+              "ship_zip": {"type": "string"}
+            },
+            "required": ["sku", "quantity", "unit_price"],
+            "additionalProperties": false
+          }
+        }
+      },
+      "schema": {
+        "type": "object",
+        "properties": {
+          "sku": {"type": "string"},
+          "quantity": {"type": "integer"},
+          "unit_price": {"type": "number"},
+          "ship_zip": {"type": "string"}
+        },
+        "required": ["sku", "quantity", "unit_price"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "tool_probes": [
+    {
+      "id": "weather_lookup",
+      "prompt": "What's the weather like in Paris right now?",
+      "expected_tool": "get_current_weather",
+      "required_args": ["location"],
+      "tools": [
+        {
+          "type": "function",
+          "function": {
+            "name": "get_current_weather",
+            "description": "Get the current weather for a location.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "location": {"type": "string", "description": "City name."},
+                "unit": {"type": "string", "enum": ["celsius", "fahrenheit"]}
+              },
+              "required": ["location"]
+            }
+          }
+        },
+        {
+          "type": "function",
+          "function": {
+            "name": "send_email",
+            "description": "Send an email message.",
+            "parameters": {
+              "type": "object",
+              "properties": {
+                "to": {"type": "string"},
+                "body": {"type": "string"}
+              },
+              "required": ["to", "body"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -165,7 +165,11 @@ def test_build_advisory() -> None:
     adv = build_advisory(results, p, info, H100, mbu=0.6, mfu=0.5)
     assert isinstance(adv, Advisory)
     assert adv.confidence == "high"  # confirmed profile
-    assert adv.fitness is None  # extension point untouched
+    # PR3: the fitness extension point is now populated with the eight
+    # application-fitness profiles plus a one-line verdict.
+    assert adv.fitness is not None
+    assert "verdict" in adv.fitness
+    assert len(adv.fitness["profiles"]) == 8
     assert adv.throughput_optimal is not None
     d = adv.to_dict()
     assert "explanation" in d and "tips" in d

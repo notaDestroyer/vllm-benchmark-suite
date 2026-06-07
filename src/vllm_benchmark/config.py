@@ -119,6 +119,9 @@ class BenchmarkConfig:
     # Bottleneck analysis
     bottleneck_sweep: bool = False  # Run prefill/decode roofline probes
 
+    # Workload selection: auto|generative|embeddings|structured
+    workload: str = "auto"
+
     @property
     def api_endpoint(self) -> str:
         return f"{self.api_url}/v1/chat/completions"

@@ -202,7 +202,91 @@ Examples:
     analysis.add_argument("--bottleneck-sweep", action="store_true",
                           help="Run prefill/decode roofline probes to find the empirical critical batch")
 
+    workload = parser.add_argument_group("Workload")
+    workload.add_argument("--workload", choices=["auto", "generative", "embeddings", "structured"],
+                          default="auto",
+                          help="Workload to run: auto (pick by server task/model)|generative|embeddings|structured")
+
     return parser
+
+
+# ------------------------------------------------------------------
+# Non-generative workload runner
+# ------------------------------------------------------------------
+
+def _run_non_generative_workloads(
+    workloads: list,
+    config: BenchmarkConfig,
+    model_name: str,
+    backend_server_info,
+    server_info: dict,
+    system_info: dict,
+) -> None:
+    """Run embeddings/structured workloads and write their JSON output.
+
+    Each selected workload is executed via its async ``run``; the per-cell
+    results and ``summarize`` metrics are saved alongside an application-
+    fitness assessment (so e.g. a structured run grades the
+    ``structured_output_fc`` profile).
+    """
+    import asyncio
+
+    from vllm_benchmark.analysis.advisor import build_advisory
+    from vllm_benchmark.reports.charts import ensure_output_directory, sanitize_filename
+
+    profile_metrics: dict = {}
+    all_cells: list[dict] = []
+    summaries: dict = {}
+
+    for wl in workloads:
+        console.print(f"\n[bold yellow]Running '{wl.name}' workload...[/bold yellow]")
+        try:
+            cells = asyncio.run(
+                wl.run(config, model_name, server_info=backend_server_info)
+            )
+        except Exception as exc:  # never fatal
+            console.print(f"[red]Workload '{wl.name}' failed: {exc}[/red]")
+            continue
+        summary = wl.summarize(cells)
+        summaries[wl.name] = summary
+        profile_metrics[wl.name] = summary
+        all_cells.extend(cells)
+        console.print(f"  [green]{wl.name}[/green]: {summary}")
+
+    # Build advisory + fitness from whatever workloads ran.
+    try:
+        from vllm_benchmark.analysis.model_intel import build_profile, match_gpu_spec
+
+        model_profile = build_profile(backend_server_info)
+        gpu_spec = match_gpu_spec(system_info.get("gpu_name"))
+        advisory = build_advisory(
+            all_cells, model_profile, backend_server_info, gpu_spec,
+            profile_metrics=profile_metrics,
+        )
+        advisory_dict = advisory.to_dict()
+        if advisory_dict.get("fitness", {}).get("verdict"):
+            console.print(f"\n[bold]Fitness:[/bold] {advisory_dict['fitness']['verdict']}")
+    except Exception as exc:  # analysis is best-effort
+        console.print(f"[dim]Fitness analysis skipped: {exc}[/dim]")
+        advisory_dict = None
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    safe_model = sanitize_filename(model_name)
+    output_path = ensure_output_directory(config.output_dir)
+
+    metadata = {
+        "timestamp": timestamp,
+        "system_info": system_info,
+        "server_info": server_info,
+        "workloads": list(summaries.keys()),
+        "workload_summaries": summaries,
+        "advisory": advisory_dict,
+    }
+    results_package = {"metadata": metadata, "results": all_cells}
+    json_file = output_path / f"benchmark_{safe_model}_{timestamp}.json"
+    with open(json_file, "w") as f:
+        json.dump(results_package, f, indent=2, default=str)
+    console.print(f"\n[bold green]Workload run complete.[/bold green] Results: {json_file}")
 
 
 # ------------------------------------------------------------------
@@ -267,6 +351,7 @@ def main():
     if args.compare:
         config.compare_file = args.compare
     config.bottleneck_sweep = args.bottleneck_sweep
+    config.workload = args.workload
 
     # ---- Header ----
     console.print(Panel.fit(
@@ -411,6 +496,22 @@ def main():
             console.print("[red]Sustained RPS benchmark returned no results.[/red]")
 
         console.print("\n[bold green]Sustained RPS benchmark complete.[/bold green]\n")
+        sys.exit(0)
+
+    # ---- Workload selection ----
+    # Default ("auto" on a generate server) keeps the historical generative
+    # path below.  Non-generative workloads (embeddings/structured, or auto
+    # on an embedding server) run via the uniform Workload interface and
+    # exit early with their own JSON output.
+    from vllm_benchmark.core.workloads import select_workloads
+
+    selected_workloads = select_workloads(backend_server_info, config.workload)
+    non_generative = [w for w in selected_workloads if w.name != "generative"]
+    if non_generative:
+        _run_non_generative_workloads(
+            non_generative, config, model_name, backend_server_info,
+            server_info, system_info,
+        )
         sys.exit(0)
 
     # ---- Warmup ----
