@@ -122,6 +122,10 @@ class BenchmarkConfig:
     # Workload selection: auto|generative|embeddings|structured
     workload: str = "auto"
 
+    # Quality measurement: off|probe|perplexity|kl (own results section)
+    quality: str = "off"
+    quality_ref: Optional[str] = None  # Reference endpoint URL for kl mode
+
     @property
     def api_endpoint(self) -> str:
         return f"{self.api_url}/v1/chat/completions"

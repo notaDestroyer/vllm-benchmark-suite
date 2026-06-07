@@ -207,6 +207,13 @@ Examples:
                           default="auto",
                           help="Workload to run: auto (pick by server task/model)|generative|embeddings|structured")
 
+    quality = parser.add_argument_group("Quality")
+    quality.add_argument("--quality", choices=["off", "probe", "perplexity", "kl"],
+                         default="off",
+                         help="Quality measurement mode (own results section): off|probe|perplexity|kl (default: off)")
+    quality.add_argument("--quality-ref", default=None, metavar="URL",
+                         help="Reference endpoint URL for --quality kl comparison")
+
     return parser
 
 
@@ -352,6 +359,8 @@ def main():
         config.compare_file = args.compare
     config.bottleneck_sweep = args.bottleneck_sweep
     config.workload = args.workload
+    config.quality = args.quality
+    config.quality_ref = args.quality_ref
 
     # ---- Header ----
     console.print(Panel.fit(
@@ -725,6 +734,24 @@ def main():
     except Exception as exc:  # analysis is best-effort, never fatal
         console.print(f"[dim]Model/bottleneck analysis skipped: {exc}[/dim]")
 
+    # ---- Quality measurement (own section; never folded into perf score) ----
+    quality_section = None
+    if config.quality != "off":
+        console.print(f"\n[bold yellow]Running quality measurement ({config.quality})...[/bold yellow]")
+        try:
+            from vllm_benchmark.analysis.quality import run_quality
+            quality_section = run_quality(
+                config.quality, config, backend_server_info, ref_url=config.quality_ref,
+            )
+            status = quality_section.get("status")
+            if status == "ok" and config.quality == "probe":
+                console.print(f"  [green]Quality probe score:[/green] {quality_section.get('score')}/100")
+            elif status == "skipped":
+                console.print(f"  [dim]Quality skipped: {quality_section.get('reason')}[/dim]")
+        except Exception as exc:  # quality is best-effort, never fatal
+            console.print(f"[red]Quality measurement failed: {exc}[/red]")
+            quality_section = {"mode": config.quality, "status": "error", "reason": str(exc)}
+
     metadata = {
         "timestamp": timestamp,
         "benchmark_duration": total_time,
@@ -743,6 +770,7 @@ def main():
         "model_profile": model_profile_dict,
         "bottlenecks": bottleneck_dicts,
         "advisory": advisory_dict,
+        "quality": quality_section,
     }
 
     results_package = {"metadata": metadata, "results": all_results}

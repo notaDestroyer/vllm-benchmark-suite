@@ -1,0 +1,10 @@
+The quick brown fox jumps over the lazy dog near the riverbank.
+Large language models are trained to predict the next token in a sequence.
+Quantization reduces the memory footprint of a model at some cost to accuracy.
+Paris is the capital of France and sits on the banks of the Seine.
+Water is composed of two hydrogen atoms and one oxygen atom.
+A benchmark measures the performance of a system under controlled conditions.
+Perplexity is the exponential of the average negative log-likelihood per token.
+The mitochondria is often described as the powerhouse of the cell.
+Throughput and latency are two distinct dimensions of serving performance.
+Reproducible experiments require fixed seeds and documented environments.
