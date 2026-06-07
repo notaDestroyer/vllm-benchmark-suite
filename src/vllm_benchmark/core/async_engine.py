@@ -343,6 +343,92 @@ async def _run_burst(
 
 
 # ------------------------------------------------------------------
+# Bottleneck roofline probes
+# ------------------------------------------------------------------
+
+async def run_prefill_probe(
+    config: BenchmarkConfig,
+    model_name: str,
+    context_length: int,
+    batch_sizes: List[int],
+    *,
+    prompt_type: str = "classic",
+) -> List[Dict]:
+    """Probe prefill behavior with a long prompt and ``max_tokens=1``.
+
+    Issues one burst per batch size where every request sends a long
+    prompt and requests a single output token, isolating the prefill
+    (compute-bound) phase.  Returns the raw aggregate stats per batch.
+
+    Args:
+        config: Benchmark config (context, endpoint, timeout, streaming).
+        model_name: Model id to send.
+        context_length: Target prompt length in tokens.
+        batch_sizes: Concurrency levels to sweep.
+        prompt_type: Prompt generator to use.
+
+    Returns:
+        A list of per-batch result dicts (``probe == "prefill"``).
+    """
+    prompt_gen = get_prompt_generator(prompt_type)
+    prompt = prompt_gen(context_length, model_name or "")
+    actual_prompt_tokens = count_tokens(prompt, model_name or "")
+    out: list[Dict] = []
+    probe_cfg = BenchmarkConfig(**{**config.__dict__})
+    probe_cfg.output_tokens = 1
+    for batch in batch_sizes:
+        start = time.perf_counter()
+        results = await _run_burst(prompt, batch, probe_cfg, model_name)
+        total_time = time.perf_counter() - start
+        stats = _compute_stats(
+            list(results), total_time, context_length, batch,
+            prompt_type, actual_prompt_tokens, None, None, None,
+        )
+        if stats:
+            stats["probe"] = "prefill"
+            out.append(stats)
+    return out
+
+
+async def run_decode_probe(
+    config: BenchmarkConfig,
+    model_name: str,
+    batch_sizes: List[int],
+    *,
+    decode_tokens: int = 256,
+    prompt_type: str = "classic",
+    short_context: int = 64,
+) -> List[Dict]:
+    """Probe decode behavior with a short prompt and a long output.
+
+    Issues one burst per batch size with a tiny prompt and a long
+    generation, isolating the decode (bandwidth-bound) phase.  Returns
+    the raw aggregate stats per batch.
+
+    Returns:
+        A list of per-batch result dicts (``probe == "decode"``).
+    """
+    prompt_gen = get_prompt_generator(prompt_type)
+    prompt = prompt_gen(short_context, model_name or "")
+    actual_prompt_tokens = count_tokens(prompt, model_name or "")
+    out: list[Dict] = []
+    probe_cfg = BenchmarkConfig(**{**config.__dict__})
+    probe_cfg.output_tokens = decode_tokens
+    for batch in batch_sizes:
+        start = time.perf_counter()
+        results = await _run_burst(prompt, batch, probe_cfg, model_name)
+        total_time = time.perf_counter() - start
+        stats = _compute_stats(
+            list(results), total_time, short_context, batch,
+            prompt_type, actual_prompt_tokens, None, None, None,
+        )
+        if stats:
+            stats["probe"] = "decode"
+            out.append(stats)
+    return out
+
+
+# ------------------------------------------------------------------
 # Sustained RPS mode
 # ------------------------------------------------------------------
 

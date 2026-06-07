@@ -197,6 +197,11 @@ Examples:
     comp = parser.add_argument_group("Comparison")
     comp.add_argument("--compare", default=None, metavar="FILE", help="Compare with previous results JSON for regression detection")
 
+    # Analysis
+    analysis = parser.add_argument_group("Analysis")
+    analysis.add_argument("--bottleneck-sweep", action="store_true",
+                          help="Run prefill/decode roofline probes to find the empirical critical batch")
+
     return parser
 
 
@@ -261,6 +266,7 @@ def main():
         np.random.seed(args.seed)
     if args.compare:
         config.compare_file = args.compare
+    config.bottleneck_sweep = args.bottleneck_sweep
 
     # ---- Header ----
     console.print(Panel.fit(
@@ -535,6 +541,89 @@ def main():
     from vllm_benchmark.core.server import capture_environment
     environment = capture_environment(server_info)
 
+    # ---- Model intelligence, roofline & bottleneck analysis ----
+    model_profile_dict = None
+    bottleneck_dicts: list[dict] = []
+    advisory_dict = None
+    try:
+        from vllm_benchmark.analysis.advisor import build_advisory
+        from vllm_benchmark.analysis.bottleneck import classify_run
+        from vllm_benchmark.analysis.model_intel import (
+            build_profile,
+            critical_batch,
+            match_gpu_spec,
+            mbu,
+            mfu,
+        )
+
+        profile = build_profile(backend_server_info)
+        gpu_spec = match_gpu_spec(system_info.get("gpu_name"))
+        model_profile_dict = profile.to_dict()
+
+        verdicts = classify_run(reporting_results, profile, gpu_spec)
+        bottleneck_dicts = [v.to_dict() for v in verdicts]
+
+        # Single-user roofline summary for the advisory explanation.
+        single = next((r for r in reporting_results if r.get("concurrent_users") == 1), None)
+        run_mbu = run_mfu = None
+        if single and gpu_spec and profile.active_params:
+            from vllm_benchmark.analysis.model_intel import bytes_per_param
+            bpp = bytes_per_param(server_info.get("quantization"))
+            run_mbu = mbu(
+                single.get("decode_tps_mean") or single.get("decode_tps_p50"),
+                profile.active_params, profile.kv_bytes_per_token,
+                single.get("context_length"), gpu_spec.get("hbm_bandwidth_gbps"), bpp,
+            )
+            peak = gpu_spec.get("peak_flops_tflops", {}).get("bf16")
+            run_mfu = mfu(single.get("prefill_tps_mean"), profile.active_params, peak)
+
+        advisory = build_advisory(
+            reporting_results, profile, backend_server_info, gpu_spec,
+            mbu=run_mbu, mfu=run_mfu,
+        )
+        advisory_dict = advisory.to_dict()
+
+        # Optional empirical critical-batch sweep.
+        if config.bottleneck_sweep:
+            import asyncio as _asyncio
+
+            from vllm_benchmark.core.async_engine import run_decode_probe, run_prefill_probe
+            console.print("\n[yellow]Running bottleneck roofline probes...[/yellow]")
+            batch_sizes = config.concurrency_levels or [1, 4, 8, 16]
+            ctx0 = config.context_lengths[0] if config.context_lengths else 32000
+            try:
+                prefill_probe = _asyncio.run(
+                    run_prefill_probe(config, model_name, ctx0, batch_sizes)
+                )
+                decode_probe = _asyncio.run(
+                    run_decode_probe(config, model_name, batch_sizes)
+                )
+                advisory_dict["bottleneck_sweep"] = {
+                    "prefill_probe": prefill_probe,
+                    "decode_probe": decode_probe,
+                    "analytic_critical_batch": critical_batch(
+                        (gpu_spec or {}).get("peak_flops_tflops", {}).get("bf16"),
+                        (gpu_spec or {}).get("hbm_bandwidth_gbps"),
+                        2.0,
+                    ) if gpu_spec else None,
+                }
+            except Exception as exc:  # never fatal
+                console.print(f"[red]Bottleneck sweep failed: {exc}[/red]")
+
+        # Concise terminal summary of the top findings.
+        if bottleneck_dicts:
+            top = max(bottleneck_dicts, key=lambda v: v.get("confidence") == "high")
+            console.print(
+                f"\n[bold]Bottleneck:[/bold] {top['primary']} "
+                f"(confidence {top['confidence']}) -> {top['lever']}"
+            )
+        if advisory_dict and advisory_dict.get("tips"):
+            console.print("[bold]Config tips:[/bold]")
+            for tip in advisory_dict["tips"]:
+                console.print(f"  - {tip}")
+    except Exception as exc:  # analysis is best-effort, never fatal
+        console.print(f"[dim]Model/bottleneck analysis skipped: {exc}[/dim]")
+
     metadata = {
         "timestamp": timestamp,
         "benchmark_duration": total_time,
@@ -550,6 +639,9 @@ def main():
             "iterations": iterations,
             "seed": args.seed,
         },
+        "model_profile": model_profile_dict,
+        "bottlenecks": bottleneck_dicts,
+        "advisory": advisory_dict,
     }
 
     results_package = {"metadata": metadata, "results": all_results}

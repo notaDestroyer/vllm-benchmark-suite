@@ -116,6 +116,9 @@ class BenchmarkConfig:
     compare_file: Optional[str] = None  # Path to previous results JSON
     prompts_file: Optional[str] = None  # Path to custom prompts JSONL
 
+    # Bottleneck analysis
+    bottleneck_sweep: bool = False  # Run prefill/decode roofline probes
+
     @property
     def api_endpoint(self) -> str:
         return f"{self.api_url}/v1/chat/completions"

@@ -1,0 +1,73 @@
+{
+  "_README": "Curated known-model facts used as an offline / gated-repo fallback for model intelligence. Keys are lowercased substrings of HuggingFace repo ids; lookup matches the longest key that is a substring of the (lowercased) repo id. total_params / active_params are in absolute parameter counts (not billions). For dense models active_params == total_params. Sources: published model cards and config.json files. Last reviewed 2026-06.",
+  "llama-3-8b": {
+    "is_moe": false, "num_experts": null, "experts_per_tok": null, "num_shared_experts": 0,
+    "num_layers": 32, "hidden_size": 4096, "num_attention_heads": 32, "num_kv_heads": 8,
+    "total_params": 8030000000, "active_params": 8030000000, "family": "llama"
+  },
+  "llama-3.1-8b": {
+    "is_moe": false, "num_experts": null, "experts_per_tok": null, "num_shared_experts": 0,
+    "num_layers": 32, "hidden_size": 4096, "num_attention_heads": 32, "num_kv_heads": 8,
+    "total_params": 8030000000, "active_params": 8030000000, "family": "llama"
+  },
+  "llama-3-70b": {
+    "is_moe": false, "num_experts": null, "experts_per_tok": null, "num_shared_experts": 0,
+    "num_layers": 80, "hidden_size": 8192, "num_attention_heads": 64, "num_kv_heads": 8,
+    "total_params": 70600000000, "active_params": 70600000000, "family": "llama"
+  },
+  "mixtral-8x7b": {
+    "is_moe": true, "num_experts": 8, "experts_per_tok": 2, "num_shared_experts": 0,
+    "num_layers": 32, "hidden_size": 4096, "num_attention_heads": 32, "num_kv_heads": 8,
+    "total_params": 46700000000, "active_params": 12900000000, "family": "mixtral"
+  },
+  "mixtral-8x22b": {
+    "is_moe": true, "num_experts": 8, "experts_per_tok": 2, "num_shared_experts": 0,
+    "num_layers": 56, "hidden_size": 6144, "num_attention_heads": 48, "num_kv_heads": 8,
+    "total_params": 141000000000, "active_params": 39000000000, "family": "mixtral"
+  },
+  "qwen2.5-7b": {
+    "is_moe": false, "num_experts": null, "experts_per_tok": null, "num_shared_experts": 0,
+    "num_layers": 28, "hidden_size": 3584, "num_attention_heads": 28, "num_kv_heads": 4,
+    "total_params": 7610000000, "active_params": 7610000000, "family": "qwen"
+  },
+  "qwen2.5-72b": {
+    "is_moe": false, "num_experts": null, "experts_per_tok": null, "num_shared_experts": 0,
+    "num_layers": 80, "hidden_size": 8192, "num_attention_heads": 64, "num_kv_heads": 8,
+    "total_params": 72700000000, "active_params": 72700000000, "family": "qwen"
+  },
+  "qwen3-30b-a3b": {
+    "is_moe": true, "num_experts": 128, "experts_per_tok": 8, "num_shared_experts": 0,
+    "num_layers": 48, "hidden_size": 2048, "num_attention_heads": 32, "num_kv_heads": 4,
+    "total_params": 30500000000, "active_params": 3300000000, "family": "qwen"
+  },
+  "qwen3-235b-a22b": {
+    "is_moe": true, "num_experts": 128, "experts_per_tok": 8, "num_shared_experts": 0,
+    "num_layers": 94, "hidden_size": 4096, "num_attention_heads": 64, "num_kv_heads": 4,
+    "total_params": 235000000000, "active_params": 22000000000, "family": "qwen"
+  },
+  "deepseek-v3": {
+    "is_moe": true, "num_experts": 256, "experts_per_tok": 8, "num_shared_experts": 1,
+    "num_layers": 61, "hidden_size": 7168, "num_attention_heads": 128, "num_kv_heads": 128,
+    "total_params": 671000000000, "active_params": 37000000000, "family": "deepseek"
+  },
+  "mistral-7b": {
+    "is_moe": false, "num_experts": null, "experts_per_tok": null, "num_shared_experts": 0,
+    "num_layers": 32, "hidden_size": 4096, "num_attention_heads": 32, "num_kv_heads": 8,
+    "total_params": 7240000000, "active_params": 7240000000, "family": "mistral"
+  },
+  "gemma-2-9b": {
+    "is_moe": false, "num_experts": null, "experts_per_tok": null, "num_shared_experts": 0,
+    "num_layers": 42, "hidden_size": 3584, "num_attention_heads": 16, "num_kv_heads": 8,
+    "total_params": 9240000000, "active_params": 9240000000, "family": "gemma"
+  },
+  "gemma-2-27b": {
+    "is_moe": false, "num_experts": null, "experts_per_tok": null, "num_shared_experts": 0,
+    "num_layers": 46, "hidden_size": 4608, "num_attention_heads": 32, "num_kv_heads": 16,
+    "total_params": 27200000000, "active_params": 27200000000, "family": "gemma"
+  },
+  "phi-3-mini": {
+    "is_moe": false, "num_experts": null, "experts_per_tok": null, "num_shared_experts": 0,
+    "num_layers": 32, "hidden_size": 3072, "num_attention_heads": 32, "num_kv_heads": 32,
+    "total_params": 3820000000, "active_params": 3820000000, "family": "phi"
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "_README": "GPU hardware specifications used for roofline (MBU/MFU) analysis. Units: hbm_bandwidth_gbps is in GB/s (gigabytes per second, 1 GB = 1e9 bytes). peak_flops_tflops gives DENSE (not 2:4 sparse) tensor-core throughput in TFLOPS for each numeric format. Sources: NVIDIA datasheets / whitepapers (H100, A100, L40S, L4, RTX 4090/5090, RTX 6000 Ada, RTX PRO 6000 Blackwell, A10G, T4). Where a vendor only publishes sparse (2:4) numbers we record half of that as the dense value, consistent with how vLLM/torch report achievable FLOPs. fp8 entries are omitted (null) for GPUs without FP8 tensor cores (Ampere/Turing). These are nominal peak values; achievable throughput is typically 50-80% of peak. Last reviewed 2026-06.",
+  "H100 SXM": {
+    "hbm_bandwidth_gbps": 3350.0,
+    "peak_flops_tflops": {"bf16": 989.0, "fp8": 1979.0, "int8": 1979.0}
+  },
+  "H100 PCIe": {
+    "hbm_bandwidth_gbps": 2000.0,
+    "peak_flops_tflops": {"bf16": 756.0, "fp8": 1513.0, "int8": 1513.0}
+  },
+  "A100-80GB": {
+    "hbm_bandwidth_gbps": 2039.0,
+    "peak_flops_tflops": {"bf16": 312.0, "fp8": null, "int8": 624.0}
+  },
+  "A100-40GB": {
+    "hbm_bandwidth_gbps": 1555.0,
+    "peak_flops_tflops": {"bf16": 312.0, "fp8": null, "int8": 624.0}
+  },
+  "L40S": {
+    "hbm_bandwidth_gbps": 864.0,
+    "peak_flops_tflops": {"bf16": 362.0, "fp8": 733.0, "int8": 733.0}
+  },
+  "L4": {
+    "hbm_bandwidth_gbps": 300.0,
+    "peak_flops_tflops": {"bf16": 121.0, "fp8": 242.0, "int8": 242.0}
+  },
+  "RTX 4090": {
+    "hbm_bandwidth_gbps": 1008.0,
+    "peak_flops_tflops": {"bf16": 165.0, "fp8": 330.0, "int8": 330.0}
+  },
+  "RTX 5090": {
+    "hbm_bandwidth_gbps": 1792.0,
+    "peak_flops_tflops": {"bf16": 209.0, "fp8": 419.0, "int8": 419.0}
+  },
+  "RTX 6000 Ada": {
+    "hbm_bandwidth_gbps": 960.0,
+    "peak_flops_tflops": {"bf16": 182.0, "fp8": 365.0, "int8": 365.0}
+  },
+  "RTX PRO 6000 Blackwell": {
+    "hbm_bandwidth_gbps": 1792.0,
+    "peak_flops_tflops": {"bf16": 251.0, "fp8": 503.0, "int8": 503.0}
+  },
+  "A10G": {
+    "hbm_bandwidth_gbps": 600.0,
+    "peak_flops_tflops": {"bf16": 70.0, "fp8": null, "int8": 140.0}
+  },
+  "T4": {
+    "hbm_bandwidth_gbps": 320.0,
+    "peak_flops_tflops": {"bf16": 65.0, "fp8": null, "int8": 130.0}
+  }
+}

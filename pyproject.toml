@@ -40,6 +40,7 @@ dependencies = [
 dev = [
     "pytest>=7.0",
     "pytest-cov>=4.0",
+    "hypothesis>=6.0",
     "ruff>=0.4.0",
 ]
 
@@ -53,6 +54,10 @@ Issues = "https://github.com/notadestroyer/vllm-benchmark-suite/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/vllm_benchmark"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"src/vllm_benchmark/data/gpu_specs.json" = "vllm_benchmark/data/gpu_specs.json"
+"src/vllm_benchmark/data/models_kb.json" = "vllm_benchmark/data/models_kb.json"
 
 [tool.ruff]
 target-version = "py310"
