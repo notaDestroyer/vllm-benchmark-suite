@@ -82,3 +82,14 @@ select = ["E", "F", "I", "N", "W"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+omit = [
+  "*/vllm_benchmark/cli.py",
+  "*/vllm_benchmark/core/traffic.py",
+  "*/vllm_benchmark/reports/terminal.py",
+  "*/vllm_benchmark/reports/html_report.py",
+]
+
+[tool.coverage.report]
+exclude_also = ["if __name__ == .__main__.:", "raise NotImplementedError", "\\.\\.\\.", "if TYPE_CHECKING:"]

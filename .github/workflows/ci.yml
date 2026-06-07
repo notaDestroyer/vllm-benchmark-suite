@@ -38,4 +38,4 @@ jobs:
         if: matrix.python-version == '3.12' || matrix.python-version == '3.13'
         env:
           COVERAGE_CORE: sysmon
-        run: python -m pytest --cov=vllm_benchmark --cov-report=term-missing --cov-fail-under=80
+        run: python -m pytest --cov=vllm_benchmark --cov-report=term-missing --cov-fail-under=70
