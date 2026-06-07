@@ -19,6 +19,121 @@ if TYPE_CHECKING:
     from vllm_benchmark.analysis.scoring import ScoreBreakdown
 
 
+def _na(value: object, suffix: str = "", fmt: str = "{}") -> str:
+    """Format a value with a suffix, or ``"N/A"`` when missing."""
+    if value is None:
+        return "N/A"
+    try:
+        return f"{fmt.format(value)}{suffix}"
+    except (ValueError, TypeError):
+        return "N/A"
+
+
+def _model_intel_section(metadata: dict) -> str:
+    """Build the model-intelligence HTML section (empty when no profile)."""
+    p = metadata.get("model_profile")
+    if not p:
+        return ""
+    arch = "MoE" if p.get("is_moe") else "dense" if p.get("is_moe") is not None else "N/A"
+
+    def _params(n: object) -> str:
+        return _na(n / 1e9 if isinstance(n, (int, float)) else None, "B", "{:.1f}")
+
+    rows = [
+        ("Model", p.get("name") or "N/A"),
+        ("Family", p.get("family") or "N/A"),
+        ("Architecture", arch),
+        ("Active params", _params(p.get("active_params"))),
+        ("Total params", _params(p.get("total_params"))),
+        ("Attention", p.get("attention_type") or "N/A"),
+        ("Layers", _na(p.get("num_layers"))),
+        ("KV bytes/token", _na(p.get("kv_bytes_per_token"))),
+        ("Provenance", f"{p.get('source', 'N/A')} ({p.get('confidence', 'N/A')})"),
+    ]
+    if p.get("is_moe"):
+        rows.insert(7, ("Experts", f"{_na(p.get('experts_per_tok'))}/{_na(p.get('num_experts'))}"))
+    body = "".join(f"<tr><td><strong>{k}</strong></td><td>{v}</td></tr>" for k, v in rows)
+    return f'<h2>Model Intelligence</h2>\n<div class="card"><table>{body}</table></div>\n'
+
+
+def _bottleneck_section(metadata: dict) -> str:
+    """Build the bottleneck-analysis HTML section (empty when none)."""
+    verdicts = metadata.get("bottlenecks") or []
+    if not verdicts:
+        return ""
+    order = {"high": 0, "medium": 1, "low": 2}
+    top = min(verdicts, key=lambda v: order.get(v.get("confidence"), 3))
+
+    rows = ""
+    for v in verdicts:
+        cell = v.get("cell") or []
+        ctx = cell[0] if len(cell) > 0 else None
+        users = cell[1] if len(cell) > 1 else None
+        ctx_label = f"{ctx // 1000}K" if isinstance(ctx, int) and ctx >= 1000 else str(ctx)
+        rows += (
+            f"<tr><td>{ctx_label}/{_na(users)}</td>"
+            f"<td>{v.get('primary') or 'unknown'}</td>"
+            f"<td>{_na(v.get('mbu'), '', '{:.0%}')}</td>"
+            f"<td>{_na(v.get('mfu'), '', '{:.0%}')}</td>"
+            f"<td>{v.get('confidence') or '?'}</td></tr>"
+        )
+    return (
+        "<h2>Bottleneck Analysis</h2>\n"
+        f'<div class="card"><p><strong>Governing:</strong> {top.get("primary", "unknown")} '
+        f'(confidence {top.get("confidence", "?")})<br>'
+        f'<strong>Lever:</strong> {top.get("lever") or "N/A"}</p>'
+        "<table><thead><tr><th>Cell</th><th>Primary</th><th>MBU</th>"
+        "<th>MFU</th><th>Conf</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table></div>\n"
+    )
+
+
+def _fitness_section(metadata: dict) -> str:
+    """Build the application-fitness HTML section (empty when none)."""
+    advisory = metadata.get("advisory") or {}
+    fitness = advisory.get("fitness") or {}
+    profiles = fitness.get("profiles") or {}
+    if not fitness:
+        return ""
+    rows = "".join(
+        f"<tr><td>{name}</td><td>{g.get('grade', 'N/A')}</td>"
+        f"<td>{g.get('limiting_factor') or ''}</td></tr>"
+        for name, g in profiles.items()
+    )
+    table = (
+        "<table><thead><tr><th>Profile</th><th>Grade</th>"
+        f"<th>Limiting factor</th></tr></thead><tbody>{rows}</tbody></table>"
+        if profiles else ""
+    )
+    return (
+        "<h2>Application Fitness</h2>\n"
+        f'<div class="card"><p><strong>Verdict:</strong> {fitness.get("verdict") or "N/A"}</p>'
+        f"{table}</div>\n"
+    )
+
+
+def _analyst_report_section(metadata: dict) -> str:
+    """Render the analyst-report section (PR6 hook).
+
+    Returns the rendered HTML for the ``analyst_report`` metadata key when
+    present; otherwise returns ``""`` so the section is omitted.  PR6 will
+    populate this; for now it is a clearly-named, no-op placeholder.
+
+    Args:
+        metadata: Run metadata; may carry an ``analyst_report`` key.
+
+    Returns:
+        The section HTML, or an empty string when there is nothing to show.
+    """
+    report = metadata.get("analyst_report")
+    if not report:
+        return ""
+    return (
+        '<h2>Analyst Report</h2>\n<section id="analyst-report">'
+        f'<div class="card">{report}</div></section>\n'
+    )
+
+
 def generate_html_report(
     results: list[dict],
     metadata: dict,
@@ -42,6 +157,12 @@ def generate_html_report(
     results_json = json.dumps(results)
     system_info = metadata.get("system_info", {})
     server_info = metadata.get("server_info", {})
+
+    # PR5 analysis sections (each empty when its data is absent).
+    intel_html = _model_intel_section(metadata)
+    bottleneck_html = _bottleneck_section(metadata)
+    fitness_html = _fitness_section(metadata)
+    analyst_html = _analyst_report_section(metadata)
 
     # Build diagnostics HTML
     diag_html = ""
@@ -154,6 +275,10 @@ def generate_html_report(
 <h2>Diagnostics</h2>
 <div class="card">{diag_html}</div>
 
+{intel_html}
+{bottleneck_html}
+{fitness_html}
+{analyst_html}
 <h2>Raw Results</h2>
 <div class="card" style="overflow-x:auto">
 <table>

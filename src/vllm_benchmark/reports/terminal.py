@@ -121,6 +121,145 @@ def print_summary_table(all_results: List[Dict]) -> None:
 
 
 # ------------------------------------------------------------------
+# PR5 analysis panels — model intel / bottleneck / fitness
+# ------------------------------------------------------------------
+
+def _na(value: object, suffix: str = "", fmt: str = "{}") -> str:
+    """Format a value with a suffix, or ``"N/A"`` when missing."""
+    if value is None:
+        return "N/A"
+    try:
+        return f"{fmt.format(value)}{suffix}"
+    except (ValueError, TypeError):
+        return "N/A"
+
+
+def render_model_intel_panel(model_profile: Optional[Dict]) -> Panel:
+    """Render the model-intelligence panel (architecture + roofline facts).
+
+    Args:
+        model_profile: ``ModelProfile.to_dict()`` (or ``None``).
+
+    Returns:
+        A rich :class:`~rich.panel.Panel` summarising the model profile.
+    """
+    table = Table(show_header=False, box=box.SIMPLE)
+    table.add_column("Field", style="cyan", no_wrap=True)
+    table.add_column("Value", style="yellow")
+
+    p = model_profile or {}
+    arch = "MoE" if p.get("is_moe") else "dense" if p.get("is_moe") is not None else "N/A"
+
+    def _params(n: object) -> str:
+        return _na(n / 1e9 if isinstance(n, (int, float)) else None, "B", "{:.1f}")
+
+    table.add_row("Model", str(p.get("name") or "N/A"))
+    table.add_row("Family", str(p.get("family") or "N/A"))
+    table.add_row("Architecture", arch)
+    table.add_row("Active params", _params(p.get("active_params")))
+    table.add_row("Total params", _params(p.get("total_params")))
+    table.add_row("Attention", str(p.get("attention_type") or "N/A"))
+    table.add_row("Layers", _na(p.get("num_layers")))
+    if p.get("is_moe"):
+        table.add_row("Experts", f"{_na(p.get('experts_per_tok'))}/{_na(p.get('num_experts'))}")
+    table.add_row("KV bytes/token", _na(p.get("kv_bytes_per_token")))
+    table.add_row("Provenance", f"{p.get('source', 'N/A')} ({p.get('confidence', 'N/A')})")
+
+    return Panel(table, title="[bold]Model Intelligence[/bold]", border_style="cyan")
+
+
+def render_bottleneck_panel(bottlenecks: Optional[List[Dict]]) -> Panel:
+    """Render the governing-bottleneck panel for a run.
+
+    Highlights the top (highest-confidence) verdict and lists per-cell
+    primaries with MBU/MFU and the recommended lever.
+
+    Args:
+        bottlenecks: List of ``BottleneckVerdict.to_dict()`` dicts.
+
+    Returns:
+        A rich :class:`~rich.panel.Panel`.
+    """
+    verdicts = bottlenecks or []
+    if not verdicts:
+        return Panel("No bottleneck verdicts available.",
+                     title="[bold]Bottleneck Analysis[/bold]", border_style="magenta")
+
+    order = {"high": 0, "medium": 1, "low": 2}
+    top = min(verdicts, key=lambda v: order.get(v.get("confidence"), 3))
+
+    table = Table(show_header=True, header_style="bold magenta", box=box.SIMPLE_HEAVY)
+    table.add_column("Cell (ctx/users)", style="cyan")
+    table.add_column("Primary", style="yellow")
+    table.add_column("MBU", justify="right")
+    table.add_column("MFU", justify="right")
+    table.add_column("Conf", justify="center")
+
+    for v in verdicts:
+        cell = v.get("cell") or []
+        ctx = cell[0] if len(cell) > 0 else None
+        users = cell[1] if len(cell) > 1 else None
+        ctx_label = f"{ctx // 1000}K" if isinstance(ctx, int) and ctx >= 1000 else str(ctx)
+        table.add_row(
+            f"{ctx_label}/{_na(users)}",
+            str(v.get("primary") or "unknown"),
+            _na(v.get("mbu"), "", "{:.0%}"),
+            _na(v.get("mfu"), "", "{:.0%}"),
+            str(v.get("confidence") or "?"),
+        )
+
+    header = Text()
+    header.append("Governing: ", style="bold")
+    header.append(f"{top.get('primary', 'unknown')} ", style="bold yellow")
+    header.append(f"(confidence {top.get('confidence', '?')})\n", style="dim")
+    header.append("Lever: ", style="bold")
+    header.append(str(top.get("lever") or "N/A"), style="green")
+
+    from rich.console import Group
+    return Panel(Group(header, table),
+                 title="[bold]Bottleneck Analysis[/bold]", border_style="magenta")
+
+
+def render_fitness_panel(advisory_fitness: Optional[Dict]) -> Panel:
+    """Render the application-fitness panel.
+
+    Args:
+        advisory_fitness: The ``advisory["fitness"]`` dict (with a
+            ``verdict`` string and per-profile ``profiles`` grades).
+
+    Returns:
+        A rich :class:`~rich.panel.Panel`.
+    """
+    fitness = advisory_fitness or {}
+    profiles = fitness.get("profiles") or {}
+
+    table = Table(show_header=True, header_style="bold green", box=box.SIMPLE)
+    table.add_column("Profile", style="cyan")
+    table.add_column("Grade", justify="center")
+    table.add_column("Limiting factor", style="dim")
+
+    grade_styles = {"Good": "green", "Marginal": "yellow", "Poor": "red", "N/A": "dim"}
+    for name, grade in profiles.items():
+        g = grade.get("grade", "N/A")
+        table.add_row(
+            name,
+            f"[{grade_styles.get(g, 'white')}]{g}[/]",
+            str(grade.get("limiting_factor") or ""),
+        )
+
+    verdict = fitness.get("verdict") or "N/A"
+    header = Text()
+    header.append("Verdict: ", style="bold")
+    header.append(verdict, style="bold yellow")
+
+    from rich.console import Group
+    if not profiles:
+        return Panel(header, title="[bold]Application Fitness[/bold]", border_style="green")
+    return Panel(Group(header, table),
+                 title="[bold]Application Fitness[/bold]", border_style="green")
+
+
+# ------------------------------------------------------------------
 # Live dashboard
 # ------------------------------------------------------------------
 

@@ -196,6 +196,15 @@ Examples:
     # Comparison
     comp = parser.add_argument_group("Comparison")
     comp.add_argument("--compare", default=None, metavar="FILE", help="Compare with previous results JSON for regression detection")
+    comp.add_argument("--compare-quants", nargs="+", default=None, metavar="FILE",
+                      help="Compare multiple result JSON files across quantizations/models (Holm-corrected)")
+    comp.add_argument("--vs", default=None, metavar="URL2",
+                      help="Run the same matrix against a second endpoint and report a head-to-head A/B")
+
+    # Sharing
+    share = parser.add_argument_group("Sharing")
+    share.add_argument("--share", action="store_true",
+                       help="Write a copy-paste Markdown summary (share_*.md) after the run")
 
     # Analysis
     analysis = parser.add_argument_group("Analysis")
@@ -297,6 +306,103 @@ def _run_non_generative_workloads(
 
 
 # ------------------------------------------------------------------
+# Quant comparison (standalone, thin orchestration over the tested core)
+# ------------------------------------------------------------------
+
+def _run_compare_quants(paths: list[str], output_dir: str) -> None:
+    """Load result JSONs, run the quant comparison and render a chart.
+
+    Orchestration is intentionally thin — the analysis core
+    (:func:`compare_quant_runs`) is the tested unit; this loads files,
+    prints the ranking and saves a comparison chart.
+    """
+    from vllm_benchmark.analysis.quant_compare import compare_quant_runs
+    from vllm_benchmark.reports.charts import ensure_output_directory, plot_quant_compare
+
+    runs: list[dict] = []
+    for p in paths:
+        try:
+            with open(p) as f:
+                runs.append(json.load(f))
+        except Exception as exc:
+            console.print(f"[red]Failed to load {p}: {exc}[/red]")
+    if len(runs) < 2:
+        console.print("[red]Need at least two result JSON files to compare.[/red]")
+        return
+
+    comparison = compare_quant_runs(runs)
+    console.print("\n[bold]Quant comparison ranking (by throughput):[/bold]")
+    for i, label in enumerate(comparison["ranking"], 1):
+        console.print(f"  {i}. {label}")
+
+    out = ensure_output_directory(output_dir)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    chart = plot_quant_compare(comparison, str(out / f"quant_compare_{ts}.png"))
+    json_path = out / f"quant_compare_{ts}.json"
+    with open(json_path, "w") as f:
+        json.dump(comparison, f, indent=2, default=str)
+    console.print(f"\n[green]Chart:[/green] {chart}")
+    console.print(f"[green]JSON:[/green]  {json_path}")
+
+
+# ------------------------------------------------------------------
+# Head-to-head A/B (thin orchestration over the tested core)
+# ------------------------------------------------------------------
+
+def _run_head_to_head(
+    config: BenchmarkConfig,
+    args,
+    model_name: str,
+    results_a: list[dict],
+    meta_a: dict,
+) -> None:
+    """Run the same matrix against ``config.vs_url`` and report a head-to-head.
+
+    Orchestration is intentionally thin — the analysis core
+    (:func:`head_to_head`) is the tested unit.  Re-runs the identical
+    matrix against the second endpoint, then prints per-metric win counts
+    and saves the comparison JSON.
+    """
+    from vllm_benchmark.analysis.head_to_head import head_to_head
+    from vllm_benchmark.reports.charts import ensure_output_directory
+
+    # Re-run the matrix against the second endpoint (reuse the run path).
+    config_b = BenchmarkConfig(
+        api_url=config.vs_url,
+        output_dir=config.output_dir,
+        streaming=config.streaming,
+        context_lengths=config.context_lengths,
+        concurrency_levels=config.concurrency_levels,
+        output_tokens=config.output_tokens,
+        prompt_types=config.prompt_types,
+    )
+    results_b: list[dict] = []
+    for pt in config_b.prompt_types:
+        for ctx in config_b.context_lengths:
+            for users in config_b.concurrency_levels:
+                cell = run_benchmark(ctx, users, config_b, model_name=model_name, prompt_type=pt)
+                if cell:
+                    results_b.append(cell)
+
+    meta_b = {"server_info": {"model_name": model_name, "backend": "endpoint_b"}}
+    comparison = head_to_head(results_a, meta_a, results_b, meta_b)
+
+    console.print("\n[bold]Head-to-head per-metric win counts:[/bold]")
+    for metric, counts in comparison["summary"].items():
+        console.print(
+            f"  {metric}: {comparison['label_a']}={counts['a']} "
+            f"{comparison['label_b']}={counts['b']} ties={counts['tie']}"
+        )
+
+    out = ensure_output_directory(config.output_dir)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    json_path = out / f"head_to_head_{ts}.json"
+    with open(json_path, "w") as f:
+        json.dump(comparison, f, indent=2, default=str)
+    console.print(f"  [green]JSON:[/green] {json_path}")
+
+
+# ------------------------------------------------------------------
 # Main
 # ------------------------------------------------------------------
 
@@ -304,6 +410,11 @@ def main():
     """Main CLI entry point for vllm-bench."""
     parser = build_parser()
     args = parser.parse_args()
+
+    # ---- Standalone quant comparison (no server run needed) ----
+    if args.compare_quants:
+        _run_compare_quants(args.compare_quants, args.output_dir)
+        sys.exit(0)
 
     # Build config
     config = BenchmarkConfig(api_url=args.url, output_dir=args.output_dir, streaming=not args.no_streaming)
@@ -358,6 +469,8 @@ def main():
     if args.compare:
         config.compare_file = args.compare
     config.bottleneck_sweep = args.bottleneck_sweep
+    config.share = args.share
+    config.vs_url = args.vs
     config.workload = args.workload
     config.quality = args.quality
     config.quality_ref = args.quality_ref
@@ -857,6 +970,19 @@ def main():
         summary_table.add_row("Cost / 1M tokens", f"${best_cost:.4f}", "Best configuration")
     console.print(summary_table)
 
+    # ---- Analysis panels (model intel / bottleneck / fitness) ----
+    from vllm_benchmark.reports.terminal import (
+        render_bottleneck_panel,
+        render_fitness_panel,
+        render_model_intel_panel,
+    )
+    if model_profile_dict:
+        console.print(render_model_intel_panel(model_profile_dict))
+    if bottleneck_dicts:
+        console.print(render_bottleneck_panel(bottleneck_dicts))
+    if advisory_dict and advisory_dict.get("fitness"):
+        console.print(render_fitness_panel(advisory_dict["fitness"]))
+
     # ---- Charts ----
     if config.generate_charts:
         console.print("\n[yellow]Generating charts...[/yellow]")
@@ -870,6 +996,21 @@ def main():
         from vllm_benchmark.reports.html_report import generate_html_report
         html_file = generate_html_report(all_results, metadata, score, diagnostics, config.output_dir)
         console.print(f"  [green]HTML:[/green] {html_file}")
+
+    # ---- Share markdown ----
+    if config.share:
+        from vllm_benchmark.reports.share import build_share_markdown, save_share_markdown
+        md = build_share_markdown(reporting_results, metadata, score)
+        share_file = save_share_markdown(md, config.output_dir)
+        console.print(f"  [green]Share:[/green] {share_file}")
+
+    # ---- Head-to-head A/B (--vs) ----
+    if config.vs_url:
+        console.print(f"\n[yellow]Running head-to-head against {config.vs_url}...[/yellow]")
+        try:
+            _run_head_to_head(config, args, model_name, reporting_results, metadata)
+        except Exception as exc:  # never fatal
+            console.print(f"[red]Head-to-head failed: {exc}[/red]")
 
     # ---- Regression detection ----
     if config.compare_file:

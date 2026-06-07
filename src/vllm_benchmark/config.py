@@ -126,6 +126,10 @@ class BenchmarkConfig:
     quality: str = "off"
     quality_ref: Optional[str] = None  # Reference endpoint URL for kl mode
 
+    # Sharing & comparison (PR5)
+    share: bool = False  # Write a copy-paste share_*.md after the run
+    vs_url: Optional[str] = None  # Second endpoint URL for head-to-head A/B
+
     @property
     def api_endpoint(self) -> str:
         return f"{self.api_url}/v1/chat/completions"
