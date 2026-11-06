@@ -228,10 +228,47 @@ def _summarize_advisory(advisory: Optional[dict]) -> dict:
     def _op_point(cell: Optional[dict]) -> Optional[dict]:
         return _cell_summary(cell) if cell else None
 
+    cap = adv.get("capacity") or {}
+    fp = cap.get("footprint") or {}
+    capacity = {
+        "quantization": sanitize_text(fp.get("quantization")),
+        "weight_gb": _round(fp["weight_bytes_total"] / 1e9, 2) if fp.get("weight_bytes_total") else None,
+        "kv_bytes_per_token": fp.get("kv_bytes_per_token"),
+        "kv_capacity_tokens": fp.get("kv_capacity_tokens"),
+        "kv_capacity_source": sanitize_text(fp.get("kv_capacity_source")),
+        "max_users_by_context": {str(k): v for k, v in ((cap.get("matrix_fit") or {}).get("max_users_by_context") or {}).items()},
+        "ceilings": [
+            {
+                "cell": [c.get("context_length"), c.get("concurrent_users")],
+                "decode_ceiling_tps": _round(c.get("decode_ceiling_tps"), 1),
+                "decode_measured_tps": _round(c.get("decode_measured_tps"), 1),
+                "decode_attainment": _round(c.get("decode_attainment"), 3),
+                "bound_by": sanitize_text(c.get("bound_by")),
+                "prefill_attainment": _round(c.get("prefill_attainment"), 3),
+            }
+            for c in (cap.get("ceilings") or [])
+        ],
+        "sweet_spot": sanitize_text((cap.get("sweet_spot") or {}).get("verdict"), max_len=400),
+        "critical_batch": (cap.get("sweet_spot") or {}).get("critical_batch"),
+        "power": sanitize_text((cap.get("power") or {}).get("verdict"), max_len=400),
+        "multi_gpu": sanitize_text((cap.get("multi_gpu") or {}).get("recommendation"), max_len=400),
+        "what_if": [
+            {
+                "format": sanitize_text(w.get("format")),
+                "supported": bool(w.get("supported")),
+                "single_stream_ceiling_tps": _round(w.get("single_stream_ceiling_tps"), 1),
+                "kv_capacity_tokens_est": w.get("kv_capacity_tokens_est"),
+                "current": bool(w.get("current")),
+            }
+            for w in (cap.get("what_if") or [])
+        ],
+    } if cap else None
+
     return {
         "explanation": sanitize_text(adv.get("explanation"), max_len=600),
         "tips": [sanitize_text(t, max_len=400) for t in (adv.get("tips") or [])],
         "confidence": adv.get("confidence"),
+        "capacity": capacity,
         "latency_optimal": _op_point(adv.get("latency_optimal")),
         "throughput_optimal": _op_point(adv.get("throughput_optimal")),
         "fitness": fitness_out,

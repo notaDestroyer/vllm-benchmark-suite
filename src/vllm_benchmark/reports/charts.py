@@ -22,6 +22,13 @@ import numpy as np
 import pandas as pd
 import seaborn as sns
 
+_MPL_39 = tuple(int(x) for x in matplotlib.__version__.split('.')[:2]) >= (3, 9)
+
+
+def _boxplot_label_kw(labels):
+    """matplotlib >= 3.9 renamed ``boxplot(labels=)`` to ``tick_labels=``."""
+    return {"tick_labels": labels} if _MPL_39 else {"labels": labels}
+
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
@@ -120,7 +127,7 @@ def visualize_results(
             latency_labels.append(f"{users}u")
 
     if latency_data:
-        bp = ax2.boxplot(latency_data, labels=latency_labels, patch_artist=True, widths=0.6)
+        bp = ax2.boxplot(latency_data, **_boxplot_label_kw(latency_labels), patch_artist=True, widths=0.6)
         for i, patch in enumerate(bp["boxes"]):
             patch.set_facecolor(colors[i % len(colors)])
             patch.set_alpha(0.7)

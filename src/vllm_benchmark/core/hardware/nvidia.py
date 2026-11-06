@@ -20,6 +20,37 @@ from typing import Dict, Optional
 
 from vllm_benchmark.core.hardware.base import HardwareMonitor
 
+#: nvidia-smi ``clocks_throttle_reasons.active`` bitmask (nvml.h
+#: nvmlClocksThrottleReasons*).  Power: SwPowerCap 0x4, HwPowerBrakeSlowdown
+#: 0x80.  Thermal: HwSlowdown 0x8, SwThermalSlowdown 0x20, HwThermalSlowdown 0x40.
+_THROTTLE_POWER_BITS = 0x4 | 0x80
+_THROTTLE_THERMAL_BITS = 0x8 | 0x20 | 0x40
+
+
+def parse_throttle_reasons(raw: Optional[str]) -> Dict[str, Optional[bool]]:
+    """Decode the throttle-reason bitmask into power / thermal flags.
+
+    Returns ``None`` flags when the field is unavailable (``[N/A]``, empty).
+    """
+    if raw is None:
+        return {"power_capped": None, "thermal": None}
+    text = raw.strip()
+    if not text or text.startswith("[") or text.lower() == "n/a":
+        return {"power_capped": None, "thermal": None}
+    try:
+        mask = int(text, 16) if text.lower().startswith("0x") else int(text)
+    except ValueError:
+        return {"power_capped": None, "thermal": None}
+    return {"power_capped": bool(mask & _THROTTLE_POWER_BITS), "thermal": bool(mask & _THROTTLE_THERMAL_BITS)}
+
+
+def _optional_float(raw: str) -> Optional[float]:
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 _gpu_monitoring_warned = False
 _warn_lock = threading.Lock()
 
@@ -107,12 +138,18 @@ class NvidiaMonitor(HardwareMonitor):
         Expected columns (in order):
             index, utilization.gpu, memory.used, memory.total,
             temperature.gpu, power.draw, clocks.gr, clocks.mem
+        and, when present (newer drivers / this poller's query):
+            clocks.max.sm, power.limit, clocks_throttle_reasons.active
+
+        The optional columns feed the "power truth" analysis: sustained
+        clock as a fraction of max, and whether the card was power-capped or
+        thermally throttled while the cell ran.
         """
         try:
             values = [v.strip() for v in line.split(",")]
             if len(values) < 8:
                 return None
-            return {
+            sample: Dict = {
                 "gpu_index": int(values[0]),
                 "gpu_util": float(values[1]),
                 "mem_used": float(values[2]),
@@ -124,6 +161,13 @@ class NvidiaMonitor(HardwareMonitor):
                 "timestamp": time.time(),
                 "perf_counter": time.perf_counter(),
             }
+            if len(values) >= 11:
+                sample["max_sm_clock"] = _optional_float(values[8])
+                sample["power_limit"] = _optional_float(values[9])
+                reasons = parse_throttle_reasons(values[10])
+                sample["power_capped"] = reasons["power_capped"]
+                sample["thermal"] = reasons["thermal"]
+            return sample
         except (ValueError, IndexError):
             return None
 
@@ -141,7 +185,8 @@ class NvidiaMonitor(HardwareMonitor):
                     "nvidia-smi",
                     f"--id={gpu_ids}",
                     "--query-gpu=index,utilization.gpu,memory.used,memory.total,"
-                    "temperature.gpu,power.draw,clocks.gr,clocks.mem",
+                    "temperature.gpu,power.draw,clocks.gr,clocks.mem,"
+                    "clocks.max.sm,power.limit,clocks_throttle_reasons.active",
                     "--format=csv,noheader,nounits",
                 ],
                 capture_output=True,
@@ -272,12 +317,31 @@ class NvidiaMonitor(HardwareMonitor):
             "avg_mem_clock": mean([s["mem_clock"] for s in stats]),
             "samples": len(stats),
         }
+        result.update(self._power_truth(stats))
 
         # Include per-GPU breakdowns for multi-GPU setups
         if self.gpu_count > 1 and self.per_gpu_stats:
             result["per_gpu"] = self._aggregate_per_gpu(window_start, window_end)
 
         return result
+
+    @staticmethod
+    def _power_truth(stats: list[Dict]) -> Dict:
+        """Sustained-clock and throttle fractions from the optional columns."""
+        out: Dict = {}
+        max_clocks = [s["max_sm_clock"] for s in stats if s.get("max_sm_clock")]
+        if max_clocks:
+            max_clock = max(max_clocks)
+            out["max_sm_clock"] = max_clock
+            out["sustained_clock_pct"] = mean([s["gpu_clock"] for s in stats]) / max_clock if max_clock else None
+        limits = [s["power_limit"] for s in stats if s.get("power_limit")]
+        if limits:
+            out["power_limit_w"] = max(limits)
+        flagged = [s for s in stats if s.get("power_capped") is not None]
+        if flagged:
+            out["power_cap_frac"] = sum(1 for s in flagged if s["power_capped"]) / len(flagged)
+            out["thermal_frac"] = sum(1 for s in flagged if s.get("thermal")) / len(flagged)
+        return out
 
     # ------------------------------------------------------------------
     # Window filtering

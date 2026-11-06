@@ -1,5 +1,6 @@
 """Report generation components."""
 
+from vllm_benchmark.reports.capacity_chart import plot_capacity
 from vllm_benchmark.reports.card import render_result_card
 from vllm_benchmark.reports.charts import (
     bottleneck_grid,
@@ -13,6 +14,7 @@ from vllm_benchmark.reports.share import build_share_markdown, save_share_markdo
 from vllm_benchmark.reports.terminal import (
     create_live_dashboard,
     render_bottleneck_panel,
+    render_capacity_panel,
     render_fitness_panel,
     render_model_intel_panel,
 )
@@ -31,4 +33,6 @@ __all__ = [
     "render_bottleneck_panel",
     "render_fitness_panel",
     "render_model_intel_panel",
+    "render_capacity_panel",
+    "plot_capacity",
 ]

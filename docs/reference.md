@@ -7,6 +7,7 @@ Everything the README summarises, in full. For the tour, see the [README](../REA
 - [Result JSON layout](#result-json-layout)
 - [Metrics in each cell](#metrics-in-each-cell)
 - [Bottleneck classes and levers](#bottleneck-classes-and-levers)
+- [Capacity and ceilings](#capacity-and-ceilings)
 - [Score](#score)
 - [Statistics](#statistics)
 - [Head-to-head](#head-to-head)
@@ -105,6 +106,7 @@ All in `--output-dir` (default `./outputs/`):
 | `benchmark_<model>_<ts>.png` | unless `--no-charts` | Five-panel chart: throughput, latency, TTFT, heatmap, scaling |
 | `roofline_<ts>.png` | unless `--no-charts` | Hardware roofline with ridge point and measured operating points |
 | `bottleneck_map_<ts>.png` | unless `--no-charts` | Context × concurrency map coloured by governing bottleneck |
+| `capacity_<ts>.png` | unless `--no-charts` | Measured vs roofline ceiling by concurrency, context slope, what-if by weight format |
 | `benchmark_<model>_<ts>.html` | unless `--no-html` | Interactive report. Data is embedded; the charts load Plotly from its CDN |
 | `result_<gpu>_<model>_<ts>.json` | always | Standardised leaderboard entry |
 | `share_<ts>.md` | `--share` | Reddit/forum Markdown summary |
@@ -162,11 +164,11 @@ Keys are present only when measurable. Non-streaming runs have no TTFT or prefil
 
 **Counts**: `successful`, `failed`, `total_requests`, `avg_prompt_tokens`, `avg_completion_tokens`
 
-**GPU** (nvidia-smi on the host running the benchmark): `avg_gpu_util`, `max_gpu_util`, `avg_mem_used`, `max_mem_used`, `avg_temperature`, `max_temperature`, `avg_power`, `max_power`, `avg_gpu_clock`, `max_gpu_clock`, `avg_mem_clock`; per-GPU breakdown under `per_gpu` on multi-GPU hosts
+**GPU** (nvidia-smi on the host running the benchmark): `avg_gpu_util`, `max_gpu_util`, `avg_mem_used`, `max_mem_used`, `avg_temperature`, `max_temperature`, `avg_power`, `max_power`, `avg_gpu_clock`, `max_gpu_clock`, `avg_mem_clock`, `max_sm_clock`, `sustained_clock_pct`, `power_limit_w`, `power_cap_frac`, `thermal_frac`; per-GPU breakdown under `per_gpu` on multi-GPU hosts
 
 **Energy**: `tokens_per_watt`, `watts_per_token`, `energy_joules`, `energy_per_token`
 
-**Server `/metrics`** (sampled during the cell): `cache_hit_rate`, `cache_queries_delta`, `cache_hits_delta`, `actual_prefill_time`, `actual_decode_time`, `prefill_speed`, peak `gpu_cache_usage_perc` (0 to 1), peak `num_requests_waiting`, peak `num_requests_running`, `preemptions` (delta)
+**Server `/metrics`** (sampled during the cell): `cache_hit_rate`, `cache_queries_delta`, `cache_hits_delta`, `actual_prefill_time`, `actual_decode_time`, `prefill_speed`, peak `gpu_cache_usage_perc` (0 to 1), peak `num_requests_waiting`, peak `num_requests_running`, `preemptions` (delta), `kv_capacity_tokens` (vLLM `cache_config_info`, SGLang `max_total_num_tokens`)
 
 **Cost** (with a known `$/hr`): `cost_per_hour`, `cost_per_1m_tokens`, `cost_total`
 
@@ -203,6 +205,32 @@ In `auto` mode both are combined per field: when the table and the device agree 
 The prefill compute ceiling is chosen by the served weight format: FP4 peak for NVFP4/MXFP4, FP8 peak for FP8, BF16 otherwise (INT4 weight-only quants dequantize to 16-bit for the matmul).
 
 MBU = decode bytes moved per second / peak HBM bandwidth, where bytes per token = active parameters × bytes per parameter + KV bytes per token × context. Reported for single-user cells only. MFU = prefill tokens per second × 2 × active parameters / peak FLOPs for the served dtype (FP8 peak when the quant is FP8). The critical batch B* = peak FLOPs / (HBM bandwidth × bytes per parameter) / 2.
+
+## Capacity and ceilings
+
+`advisory.capacity` in the results JSON (and the Capacity & Ceilings panel, HTML section, share lines, `capacity_*.png`). Everything is arithmetic on the model profile, the GPU spec and the measured cells; no number is invented and `method` records the formulas and references.
+
+**Footprint.** `weight_bytes = total_params × bytes_per_param(quant)`; `kv_bytes_per_token` from the model profile (layers × KV heads × head_dim × 2 × bytes, or the MLA latent). Tensor and pipeline parallelism divide both by `TP × PP` per GPU. GPU memory comes from NVML (`system_info.gpu_spec._device.memory_total_mb`) or `total_vram_gb / gpu_count`.
+
+**KV capacity (tokens).** `source = "server"` when the server publishes it: vLLM `vllm:cache_config_info{num_gpu_blocks, block_size}` (their product), SGLang `max_total_num_tokens`. Otherwise `"estimated"` as `(memory × utilisation − weights_per_gpu) × (1 − 0.08 activation reserve) / kv_bytes_per_token_per_gpu`, with utilisation 0.90 unless the server reports its own. `max_users_by_context[L] = capacity // (L + output_tokens)`; `cells_over_capacity` lists matrix cells with more users than that. The pre-run check prints these before any request is sent.
+
+**Decode ceiling** (aggregate tokens/s at concurrency N, context L): `N × BW_total / (W + N × KV × L_eff)` where `BW_total = gpus × bandwidth`, `L_eff = L + output_tokens / 2` (mean sequence length during decode), capped by the compute ceiling. `bound_by` says which limit applied. **Measured** is `decode_tps_mean × users` when the streaming split exists, else `tokens_per_second`; **attainment** is measured / ceiling.
+
+**Prefill ceiling**: `peak_FLOPs(format) / (2 × active_params)` with the format chosen from the served quant (FP4 for NVFP4/MXFP4, FP8 for FP8, BF16 otherwise). Prefill attainment is the MFU of that cell.
+
+**Context slope**: single-user ceiling and measurement per context, plus `kv_share_of_bytes = KV × L / (W + KV × L)`. When the measured curve falls faster than the ceiling, the slowdown is the server (attention kernel, paging), not the memory system.
+
+**What-if**: for BF16, FP8, INT4 weight-only and NVFP4, the projected weights, estimated KV capacity, max users at the first context and single-stream ceiling, using the same roofline. Formats whose tensor peak the GPU lacks are reported `supported: false`. INT4 weight-only keeps the BF16 compute ceiling (it dequantizes for the matmul). A final row projects FP8 KV cache (KV bytes halved) for the current weights.
+
+**Operating point**: walking the concurrency levels per context, the sweet spot is the last level at which the added throughput is at least 50 percent of what linear scaling would add. The verdict compares it with the critical batch `B* = peak_FLOPs / (BW × bytes_per_param) / 2`: a knee well below B* is the server's, a knee near B* is the hardware's.
+
+**Power**: from the poller's new columns (`clocks.max.sm`, `power.limit`, `clocks_throttle_reasons.active`), each cell carries `sustained_clock_pct`, `power_limit_w`, `power_cap_frac` and `thermal_frac`. The verdict names power-limited (capped more than half the time), thermally throttled (more than 20 percent), or neither. Throttle bits follow `nvml.h`: power = SwPowerCap 0x4 | HwPowerBrake 0x80; thermal = HwSlowdown 0x8 | SwThermal 0x20 | HwThermal 0x40.
+
+**Multi-GPU**: with more than one GPU, if the weights fit on one, replicas are recommended over tensor parallel (no all-reduce per layer over PCIe); if they do not, the minimum TP is computed from the weight bytes and usable memory.
+
+**Server command**: `--max-model-len = min(max context + output_tokens, KV capacity)`, `--max-num-seqs = max(users that fit at the largest context, measured throughput-optimal users)`, the server's utilisation, TP, FP8 KV cache when already in use, and `--enable-prefix-caching` when the server reports it off. SGLang gets the equivalent flags plus `--enable-metrics`.
+
+References: Williams, Waterman & Patterson, *Roofline: an insightful visual performance model* (CACM 2009); Pope et al., *Efficiently Scaling Transformer Inference* (2022); Kaplan et al., *Scaling Laws for Neural Language Models* (2020); Databricks, *LLM Inference Performance Engineering: Best Practices* (2023).
 
 ## Score
 

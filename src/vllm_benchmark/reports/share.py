@@ -202,6 +202,26 @@ def build_share_markdown(
     else:
         parts.append("**Bottleneck:** N/A")
 
+    # Capacity / ceilings one-liners (when the analysis ran).
+    cap = advisory.get("capacity") or {}
+    fp = cap.get("footprint") or {}
+    best = cap.get("best_attainment") or {}
+    if fp.get("kv_capacity_tokens"):
+        fit = cap.get("matrix_fit") or {}
+        mu = fit.get("max_users_by_context") or {}
+        users = ", ".join(f"{int(c) // 1000}K: {u}" for c, u in sorted(mu.items(), key=lambda kv: int(kv[0])))
+        parts.append(f"**KV capacity:** {fp['kv_capacity_tokens']:,} tokens ({fp.get('kv_capacity_source')})"
+                     + (f" — max users by context: {users}" if users else ""))
+    if best.get("decode_attainment") is not None:
+        parts.append(f"**Roofline attainment:** {best['decode_attainment']:.0%} of the decode ceiling at "
+                     f"{best['context_length'] // 1000}K x {best['concurrent_users']} users ({best.get('bound_by')}-bound)")
+    spot = (cap.get("sweet_spot") or {}).get("verdict")
+    if spot:
+        parts.append(f"**Operating point:** {spot}")
+    power = (cap.get("power") or {}).get("verdict")
+    if power:
+        parts.append(f"**Power:** {power}")
+
     body = "\n".join(parts)
     if include_footer:
         body += f"\n\n_Generated {datetime.now().isoformat(timespec='seconds')}_"
