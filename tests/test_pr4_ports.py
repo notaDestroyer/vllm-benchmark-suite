@@ -82,5 +82,8 @@ def test_get_all_gpu_stats_warns_once_on_missing_binary(monkeypatch):
     assert buf.getvalue().count("[WARNING]") == 1
 
 
-def test_version_bumped():
-    assert __version__ == "4.1.0"
+def test_version_matches_pyproject():
+    import re
+    from pathlib import Path
+    text = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    assert __version__ == re.search(r'^version = "([^"]+)"', text, re.M).group(1)
