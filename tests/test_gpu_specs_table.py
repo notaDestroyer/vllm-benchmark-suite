@@ -33,7 +33,20 @@ def _gen():
 
 def test_committed_table_matches_generator():
     gen = _gen()
-    assert SPEC_PATH.read_text() == gen.render(gen.build_table()), "run scripts/gen_gpu_specs.py"
+    table = gen.build_table()
+    assert SPEC_PATH.read_text() == gen.render(table), "run scripts/gen_gpu_specs.py"
+    assert (ROOT / "docs" / "gpus.md").read_text() == gen.render_docs(table), "run scripts/gen_gpu_specs.py"
+
+
+@pytest.mark.parametrize("name, key", [
+    ("NVIDIA RTX PRO 6000", "RTX PRO 6000 Blackwell"),       # some drivers omit the generation word
+    ("NVIDIA RTX PRO 5000", "RTX PRO 5000 Blackwell"),
+    ("NVIDIA RTX 6000 Ada Generation", "RTX 6000 Ada"),
+    ("Quadro RTX 6000", None),                                 # Turing-era card: never the Ada entry
+    ("NVIDIA RTX 6000", "RTX 6000 Ada"),                       # no driver reports this; Ada is the only non-Quadro RTX 6000
+])
+def test_generation_word_optional_but_never_wrong(name, key):
+    assert match_gpu_key(name, load_gpu_specs().keys()) == key
 
 
 def test_table_covers_ampere_to_blackwell():

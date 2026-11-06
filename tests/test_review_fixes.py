@@ -32,7 +32,7 @@ from vllm_benchmark.core.metrics import MetricsMonitor, _parse_prom_line, parse_
     ("NVIDIA GeForce RTX 3090", "RTX 3090"),
     ("NVIDIA GeForce RTX 4080", "RTX 4080"),
     ("NVIDIA RTX A6000", "RTX A6000"),
-    ("NVIDIA RTX 6000", None),             # Quadro RTX 6000 (Turing): not in any table
+    ("Quadro RTX 6000", None),             # Turing-era card: never the Ada or Blackwell entry
     ("NVIDIA GeForce RTX 3080 Ti", "RTX 3080 Ti"),
     ("NVIDIA A40", "A40"),
     ("NVIDIA A30", "A30"),

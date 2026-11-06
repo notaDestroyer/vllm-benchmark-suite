@@ -97,7 +97,7 @@ How to read it:
 - **The `OK` lines** are one per cell: context length, concurrent users, prompt type, aggregate tok/s and average request latency.
 - **Bottleneck** is the governing limit at the most loaded high-confidence cell, with the lever to pull. The classes are `decode_weight_bandwidth`, `decode_kv_bandwidth`, `decode_compute`, `prefill_compute`, `queue`, `kv_capacity`, `interconnect`, or `unknown` when the model or GPU could not be identified.
 - **MBU** is the fraction of the GPU's HBM bandwidth you are using during single-user decode. On a consumer card at batch 1 this is the number that matters: 60 to 80 percent is about as good as it gets. **MFU** is the fraction of peak FLOPs during prefill; it is a ±15 percent estimate, not a billing figure.
-- **The score** is a 0 to 10,000 composite against a per-GPU baseline (H100, A100, L40S, RTX 4090/5090, RTX 6000 Ada, RTX PRO 6000). Grades: S at 9000, A at 7500, B at 6000, C at 4500, D at 3000, F below. Energy scores default to the midpoint when there is no nvidia-smi telemetry, so a CPU-only client machine gets a neutral energy score, not a penalty.
+- **The score** is a 0 to 10,000 composite against a per-GPU baseline (H100, A100, L40S, RTX 4090/5090, RTX 6000 Ada, RTX PRO 6000 Blackwell). Grades: S at 9000, A at 7500, B at 6000, C at 4500, D at 3000, F below. Energy scores default to the midpoint when there is no nvidia-smi telemetry, so a CPU-only client machine gets a neutral energy score, not a penalty.
 
 Below that comes the **Capacity & Ceilings** panel, which is where "how do I get the most out of this model on this card" is answered with numbers instead of tips:
 
@@ -133,7 +133,7 @@ Below that comes the **Capacity & Ceilings** panel, which is where "how do I get
 - **What-if** projects weights, KV room and the single-stream ceiling for BF16, FP8, INT4 and NVFP4 (and FP8 KV cache) on *this* card, marking formats the card cannot run.
 - **Suggested serve command** is sized from those numbers: `--max-model-len` from the KV budget, `--max-num-seqs` from the users that fit at the largest context, never below the measured sweet spot.
 
-The formulas and their sources are in the [reference](docs/reference.md#capacity-and-ceilings).
+The formulas and their sources are in the [reference](docs/reference.md#capacity-and-ceilings). The built-in roofline table covers 49 cards from Ampere to Blackwell (B200, RTX PRO 6000/5000/4500 Blackwell, RTX 5060 to 5090, the Hopper and Ada datacenter parts, RTX 30/40, and more); the full list with their numbers is in [docs/gpus.md](docs/gpus.md). On the GPU host the spec is derived from the device itself, so an unlisted card still gets a correct roofline.
 
 Everything also lands in `./outputs/`: `benchmark_*.json` (all numbers, plus `model_profile`, `bottlenecks`, `advisory` with its `capacity` section, `quality`), a CSV, PNG charts including the roofline, a context × concurrency bottleneck map and the capacity figure (measured vs ceiling by concurrency, context slope, what-if by format), and an interactive HTML report.
 
@@ -231,7 +231,7 @@ vllm-bench ... --quality kl --quality-ref http://fp16-server:8000  # KL divergen
 
 ## Cost and energy
 
-Cost per million tokens is reported per cell when a `$/hr` rate is known. Pass `--cost 0.74` or let it auto-detect from the GPU name for H100, A100, L40S, L4, A10G, T4, RTX 4090/5090, RTX 6000 Ada and RTX PRO 6000. The rate is multiplied by the GPUs the server actually occupies (tensor × pipeline parallel), not the whole box. Tokens per watt comes from nvidia-smi power draw when the benchmark runs on the GPU host.
+Cost per million tokens is reported per cell when a `$/hr` rate is known. Pass `--cost 0.74` or let it auto-detect from the GPU name for H100, A100, L40S, L4, A10G, T4, RTX 4090/5090, RTX 6000 Ada and RTX PRO 6000 Blackwell. The rate is multiplied by the GPUs the server actually occupies (tensor × pipeline parallel), not the whole box. Tokens per watt comes from nvidia-smi power draw when the benchmark runs on the GPU host.
 
 GPU names are matched by token, so `NVIDIA A100-SXM4-80GB`, `NVIDIA H100 80GB HBM3` and `4x NVIDIA H100 80GB HBM3` all resolve, and a 3090 or A6000 is never mistaken for a 4090. Unknown cards get no baseline and no price; the run still works.
 
