@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## v4.2.1 - Generated GPU Table (2026-11-06)
+
+The curated roofline table is now generated from per-SKU facts and covers
+49 cards from Ampere to Blackwell; three table/matching errors found while
+generating it are fixed. No API changes.
 
 ### Added
 - **Generated GPU spec table, Ampere to Blackwell** — `scripts/gen_gpu_specs.py`
