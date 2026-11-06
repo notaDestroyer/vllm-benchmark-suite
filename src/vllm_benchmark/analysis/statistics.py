@@ -13,7 +13,6 @@ License: MIT
 
 from __future__ import annotations
 
-from collections import defaultdict
 from typing import Any
 
 import numpy as np
@@ -457,40 +456,56 @@ _AGGREGATION_METRICS = (
 )
 
 
+#: Keys that identify a configuration cell (never aggregated).
+_CELL_KEYS = ("context_length", "concurrent_users", "prompt_type")
+
+#: Per-iteration bookkeeping keys that are meaningless after aggregation.
+_DROP_KEYS = ("iteration",)
+
+
+def _is_number(value: Any) -> bool:
+    """True for int/float (but not bool) values."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def aggregate_iterations(
     iteration_results: list[list[dict]],
 ) -> list[dict]:
     """Aggregate multiple iterations of the same test configuration.
 
     Groups individual result dicts by
-    ``(context_length, concurrent_users, prompt_type)`` and, for each
-    group, computes robust statistics across iterations for the key
-    performance metrics.
+    ``(context_length, concurrent_users, prompt_type)`` and collapses each
+    group into a single representative cell:
+
+    * **Every numeric metric** (``prefill_tps_mean``, ``latency_p99``,
+      ``avg_gpu_util``, ``cost_per_1m_tokens``, ``failed``, ...) is
+      replaced by its median across iterations, so downstream consumers
+      (bottleneck classification, fitness, scoring, diagnostics) see the
+      same schema as a single-iteration run.  Integer-valued inputs stay
+      integers when the median is integral.
+    * The primary metrics in ``_AGGREGATION_METRICS`` additionally get
+      ``{metric}_ci_lower`` / ``{metric}_ci_upper`` (95% CI), a full
+      ``{metric}_stats`` robust-statistics dict and ``{metric}_samples``
+      (the per-iteration values, used by head-to-head / quant comparison).
+    * Per-request sample lists (``*_samples`` emitted by the engine) are
+      pooled across iterations.
+    * Non-numeric fields (``pp_tg_source``, ``prompt_source``, ...) are
+      carried over from the first iteration that has them.
+    * ``n_iterations`` records how many iterations contributed.
 
     Args:
         iteration_results: A list of iterations, where each iteration is
             itself a list of result dicts.  Every result dict is expected
-            to contain at least ``context_length``, ``concurrent_users``,
-            and ``prompt_type`` keys.
+            to contain at least the three cell keys.
 
     Returns:
         A list of aggregated result dicts, one per unique configuration
-        group.  Each dict contains, for every metric in
-        ``_AGGREGATION_METRICS``, the median value under the metric name
-        and additional ``{metric}_ci_lower`` / ``{metric}_ci_upper``
-        fields.  Robust-stats summaries are stored under
-        ``{metric}_stats``.
+        group, in first-seen order.
     """
     if not iteration_results:
         return []
 
-    # Collect per-group, per-metric values across iterations.
-    # Key: (context_length, concurrent_users, prompt_type)
-    # Value: {metric_name: [values across iterations]}
-    grouped: dict[tuple, dict[str, list[float]]] = defaultdict(
-        lambda: defaultdict(list)
-    )
-
+    grouped: dict[tuple, list[dict]] = {}
     for iteration in iteration_results:
         for result in iteration:
             key = (
@@ -498,33 +513,63 @@ def aggregate_iterations(
                 result.get("concurrent_users", 1),
                 result.get("prompt_type", ""),
             )
-            for metric in _AGGREGATION_METRICS:
-                val = result.get(metric)
-                if val is not None:
-                    grouped[key][metric].append(float(val))
+            grouped.setdefault(key, []).append(result)
 
-    # Build aggregated output.
     aggregated: list[dict] = []
-    for (ctx, users, ptype), metrics_map in grouped.items():
+    for (ctx, users, ptype), cells in grouped.items():
         entry: dict[str, Any] = {
             "context_length": ctx,
             "concurrent_users": users,
             "prompt_type": ptype,
         }
 
-        for metric in _AGGREGATION_METRICS:
-            metric_values = metrics_map.get(metric, [])
-            if not metric_values:
+        # Preserve first-seen key order so the aggregated cell reads like
+        # a single-run cell.
+        ordered_keys: list[str] = []
+        for cell in cells:
+            for k in cell:
+                if k not in ordered_keys:
+                    ordered_keys.append(k)
+
+        for k in ordered_keys:
+            if k in _CELL_KEYS or k in _DROP_KEYS:
+                continue
+            present = [c[k] for c in cells if k in c and c[k] is not None]
+            if not present:
                 continue
 
-            stats = compute_robust_stats(metric_values)
+            if all(_is_number(v) for v in present):
+                values = [float(v) for v in present]
+                median = float(np.median(values))
+                if all(isinstance(v, int) for v in present) and median.is_integer():
+                    entry[k] = int(median)
+                else:
+                    entry[k] = median
+                continue
 
-            # Use the median as the representative value (robust to outliers).
+            if all(isinstance(v, (list, tuple)) for v in present):
+                pooled: list[Any] = []
+                for v in present:
+                    pooled.extend(v)
+                entry[k] = pooled
+                continue
+
+            # Strings, bools, dicts: carry the first value through.
+            entry[k] = present[0]
+
+        # Primary metrics: CI, robust stats, and cross-iteration samples.
+        for metric in _AGGREGATION_METRICS:
+            metric_values = [float(c[metric]) for c in cells if _is_number(c.get(metric))]
+            if not metric_values:
+                continue
+            stats = compute_robust_stats(metric_values)
             entry[metric] = stats["median"]
             entry[f"{metric}_ci_lower"] = stats["ci_lower"]
             entry[f"{metric}_ci_upper"] = stats["ci_upper"]
             entry[f"{metric}_stats"] = stats
+            entry[f"{metric}_samples"] = metric_values
 
+        entry["n_iterations"] = len(cells)
         aggregated.append(entry)
 
     return aggregated
