@@ -14,11 +14,18 @@ bootstrap confidence intervals of the two means do not overlap.  Otherwise
 the cell/metric is reported as a **tie** — the module never fabricates an
 unsupported "X is faster" claim.
 
-Because a single benchmark cell usually yields one aggregate value per
-metric, samples are drawn from the per-cell distribution where available
-(``*_samples`` / percentile fields) and fall back to the point estimate;
-ties are the honest default when there is not enough spread to separate
-the endpoints.
+Samples are drawn from the per-cell raw sample lists that the engine
+emits (``latency_samples``, ``ttft_samples``, ``prefill_tps_samples``,
+``decode_tps_samples``, ``request_tps_samples``) or, for multi-iteration
+runs, the cross-iteration ``*_samples`` lists produced by
+:func:`~vllm_benchmark.analysis.statistics.aggregate_iterations`.  When no
+sample list is present the point estimate is used and a tie is the honest
+default: a single value per side can never be statistically significant.
+
+Per-request throughput samples (``request_tps_samples``) are the spread
+behind the aggregate ``tokens_per_second``; the verdict dict therefore
+reports both ``mean_a``/``mean_b`` (the sample means) and
+``point_a``/``point_b`` (the cell-level aggregate values).
 
 All functions here are pure (no I/O, no printing) and fully unit-testable
 on synthetic result dicts.
@@ -43,18 +50,27 @@ _METRICS: dict[str, dict[str, Any]] = {
     "ttft_estimate": {"higher_is_better": False},
     "prefill_tps": {"higher_is_better": True},
     "decode_tps": {"higher_is_better": True},
-    "latency_p99": {"higher_is_better": False},
+    "avg_latency": {"higher_is_better": False},
 }
 
 #: Per-metric candidate sample sources, tried in order.  The first source
 #: that yields a non-empty list of values wins; otherwise the point
-#: estimate (single value) is used.
+#: estimate (single value) is used.  Cross-iteration lists
+#: (``<metric>_samples`` from ``aggregate_iterations``) are preferred over
+#: the engine's per-request lists because they sample the *same* statistic
+#: as the point estimate.
 _SAMPLE_SOURCES: dict[str, tuple[str, ...]] = {
-    "tokens_per_second": ("tokens_per_second_samples",),
-    "ttft_estimate": ("ttft_samples", "ttft_estimate_samples"),
+    "tokens_per_second": ("tokens_per_second_samples", "request_tps_samples"),
+    "ttft_estimate": ("ttft_estimate_samples", "ttft_samples"),
     "prefill_tps": ("prefill_tps_samples",),
     "decode_tps": ("decode_tps_samples",),
-    "latency_p99": ("latency_samples",),
+    "avg_latency": ("avg_latency_samples", "latency_samples"),
+}
+
+#: Point-estimate fallbacks when the primary metric key is absent.
+_POINT_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "prefill_tps": ("prefill_tps_mean", "prefill_tps_p50"),
+    "decode_tps": ("decode_tps_mean", "decode_tps_p50"),
 }
 
 
@@ -96,11 +112,22 @@ def _metric_sample(cell: dict, metric: str) -> list[float]:
     for source in _SAMPLE_SOURCES.get(metric, ()):  # explicit sample lists
         raw = cell.get(source)
         if isinstance(raw, (list, tuple)) and raw:
-            return [float(v) for v in raw if v is not None]
-    val = cell.get(metric)
+            vals = [float(v) for v in raw if v is not None]
+            if vals:
+                return vals
+    val = _point_estimate(cell, metric)
     if val is None:
         return []
     return [float(val)]
+
+
+def _point_estimate(cell: dict, metric: str) -> Optional[float]:
+    """Cell-level point estimate for ``metric`` (with key fallbacks)."""
+    for key in (metric, *_POINT_FALLBACKS.get(metric, ())):
+        val = cell.get(key)
+        if val is not None:
+            return float(val)
+    return None
 
 
 def _index_by_cell(results: list[dict]) -> dict[tuple, dict]:
@@ -142,7 +169,8 @@ def head_to_head(
           where ``metrics`` maps a metric name to a verdict dict
           (``winner`` in ``{"a", "b", None}``, ``tie``, ``cohens_d``,
           ``cliffs_delta``, ``welch_p``, ``adjusted_p``, ``ci_a``,
-          ``ci_b``, ``n_a``, ``n_b``, ``mean_a``, ``mean_b``).
+          ``ci_b``, ``n_a``, ``n_b``, ``mean_a``, ``mean_b``, ``point_a``,
+          ``point_b``).
         * ``summary`` — per-metric win counts ``{"a", "b", "tie"}``.
         * ``n_matched_cells`` — number of matched cells.
         * ``n_comparisons`` — number of Holm-corrected comparisons.
@@ -177,6 +205,8 @@ def head_to_head(
                 "n_b": len(b_vals),
                 "mean_a": (sum(a_vals) / len(a_vals)) if a_vals else None,
                 "mean_b": (sum(b_vals) / len(b_vals)) if b_vals else None,
+                "point_a": _point_estimate(cell_a, metric),
+                "point_b": _point_estimate(cell_b, metric),
             })
 
     adjusted = holm_adjusted_p([r["compare"]["welch_p"] for r in raw])
@@ -218,6 +248,8 @@ def head_to_head(
             "n_b": entry["n_b"],
             "mean_a": entry["mean_a"],
             "mean_b": entry["mean_b"],
+            "point_a": entry["point_a"],
+            "point_b": entry["point_b"],
         }
 
     cells = [

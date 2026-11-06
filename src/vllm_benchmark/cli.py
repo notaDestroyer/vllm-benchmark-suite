@@ -990,7 +990,11 @@ def main():
     with open(json_file, "w") as f:
         json.dump(results_package, f, indent=2)
 
-    df = pd.DataFrame(all_results)
+    # Raw sample lists / nested stats live in the JSON; keep the CSV scalar.
+    df = pd.DataFrame([
+        {k: v for k, v in r.items() if not isinstance(v, (list, dict, tuple))}
+        for r in all_results
+    ])
     csv_file = output_path / f"benchmark_{safe_model}_{timestamp}.csv"
     df.to_csv(csv_file, index=False)
 

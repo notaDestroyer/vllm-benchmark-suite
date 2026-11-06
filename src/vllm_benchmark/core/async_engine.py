@@ -621,6 +621,23 @@ def _compute_stats(
         result_dict["itl_p95"] = itl_percentiles.get("p95", 0)
         result_dict["itl_p99"] = itl_percentiles.get("p99", 0)
 
+    # Raw per-request samples.  These give downstream A/B comparisons
+    # (``--vs``, ``--compare-quants``) real within-cell spread instead of a
+    # single point estimate, so hypothesis tests can actually reject.
+    # ``request_tps_samples`` is *per-request* throughput
+    # (completion_tokens / duration); the cell-level ``tokens_per_second``
+    # remains the aggregate (sum of tokens / wall time).
+    result_dict["latency_samples"] = [float(d) for d in durations]
+    if ttft_values:
+        result_dict["ttft_samples"] = [float(t) for t in ttft_values]
+    request_tps = [
+        r["completion_tokens"] / r["duration"]
+        for r in successful
+        if r.get("duration") and r["duration"] > 0 and r.get("completion_tokens")
+    ]
+    if request_tps:
+        result_dict["request_tps_samples"] = [float(v) for v in request_tps]
+
     # Prefill / decode (pp/tg) throughput split — only present when the
     # client-side streaming parser could derive real per-phase numbers.
     sources = {r.get("pp_tg_source") for r in successful if r.get("pp_tg_source")}
@@ -632,6 +649,9 @@ def _compute_stats(
     prefill_values = [r.get("prefill_tps") for r in successful if r.get("prefill_tps") is not None]
     if prefill_values:
         prefill_percentiles = calculate_percentiles(prefill_values)
+        result_dict["prefill_tps_samples"] = [float(v) for v in prefill_values]
+        # Plain ``prefill_tps`` is the cell-level point estimate (== mean).
+        result_dict["prefill_tps"] = mean(prefill_values)
         result_dict["prefill_tps_mean"] = mean(prefill_values)
         result_dict["prefill_tps_p50"] = prefill_percentiles.get("p50", 0)
         result_dict["prefill_tps_p90"] = prefill_percentiles.get("p90", 0)
@@ -640,6 +660,8 @@ def _compute_stats(
     decode_values = [r.get("decode_tps") for r in successful if r.get("decode_tps") is not None]
     if decode_values:
         decode_percentiles = calculate_percentiles(decode_values)
+        result_dict["decode_tps_samples"] = [float(v) for v in decode_values]
+        result_dict["decode_tps"] = mean(decode_values)
         result_dict["decode_tps_mean"] = mean(decode_values)
         result_dict["decode_tps_p50"] = decode_percentiles.get("p50", 0)
         result_dict["decode_tps_p90"] = decode_percentiles.get("p90", 0)
