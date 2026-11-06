@@ -145,7 +145,7 @@ vllm-bench --standard --vs http://other-server:8000    # vLLM-vs-SGLang head-to-
 - **`--share`** writes `share_*.md`, a Reddit/forum-ready Markdown summary you can paste directly.
 - **Result card** — a shareable result-card PNG (`result_card.png`) is available via the `render_result_card` reporting API.
 - **`--compare-quants FILE...`** compares multiple result JSONs across quantizations/models, with Holm-corrected significance and a `quant_compare_*.png` chart.
-- **`--vs URL2`** re-runs the identical matrix against a second endpoint and reports a head-to-head A/B (`head_to_head_*.json`) — ideal for vLLM vs SGLang on the same model and hardware. The comparison runs on the per-request sample lists each cell carries (`latency_samples`, `ttft_samples`, `prefill_tps_samples`, `decode_tps_samples`, `request_tps_samples`), or on cross-iteration samples when `--iterations` is used, so Welch / Mann-Whitney tests have real spread. Metrics compared: `tokens_per_second`, `ttft_estimate`, `prefill_tps`, `decode_tps`, `avg_latency`. A winner is declared only when the difference is statistically and practically significant after Holm correction and the bootstrap CIs do not overlap; otherwise the cell is a tie.
+- **`--vs URL2`** re-runs the identical matrix against a second endpoint and reports a head-to-head A/B (`head_to_head_*.json`) — ideal for vLLM vs SGLang on the same model and hardware. The comparison runs on the per-request sample lists each cell carries (`latency_samples`, `ttft_samples`, `prefill_tps_samples`, `decode_tps_samples`, `request_tps_samples`), or on cross-iteration samples when `--iterations` is used, so Welch / Mann-Whitney tests have real spread. Metrics compared: `tokens_per_second` (aggregate, sampled only across `--iterations`), `request_tps` (per-request throughput), `ttft_estimate`, `prefill_tps`, `decode_tps`, `avg_latency`. A winner is declared only when the difference is statistically and practically significant after Holm correction, the bootstrap CIs do not overlap, and the sample means agree with the cell-level point estimates about which side is ahead; otherwise the cell is a tie and `tie_reason` says why (`not_significant` or `direction_conflict`). Per-request throughput is kept separate from the aggregate on purpose: an endpoint that fails half its requests can be faster per request yet slower overall.
 - **`--leaderboard [DIR]`** builds `LEADERBOARD.md` from the `result_*.json` entries in a directory (default `./outputs`) without touching a server.
 
 ---
@@ -225,7 +225,7 @@ vllm-bench --standard --cost 2.21       # explicit $/hr
 vllm-bench --standard                   # auto-detected from GPU name
 ```
 
-Reported per test: cost per 1M tokens and total cost for that configuration. Known cloud on-demand rates are built in for H100, A100 (80/40GB), L40S, RTX 4090, T4, and others; the auto-detected rate is per GPU and is multiplied by the detected GPU count. GPU names are matched by token (so `NVIDIA A100-SXM4-80GB`, `NVIDIA H100 80GB HBM3` and `4x NVIDIA H100 80GB HBM3` all resolve), with the same matcher used for the score baselines and the roofline spec table.
+Reported per test: cost per 1M tokens and total cost for that configuration. Known cloud on-demand rates are built in for H100, A100 (80/40GB), L40S, RTX 4090, T4, and others; the auto-detected rate is per GPU and is multiplied by the GPUs the server occupies (tensor × pipeline parallel when the server reports them, otherwise the host's GPU count). GPU names are matched by token (so `NVIDIA A100-SXM4-80GB`, `NVIDIA H100 80GB HBM3` and `4x NVIDIA H100 80GB HBM3` all resolve, while an RTX 3090 or A6000 is never mistaken for an RTX 4090), with the same matcher used for the score baselines and the roofline spec table.
 
 ---
 
@@ -246,7 +246,7 @@ Or use your own:
 vllm-bench --prompts-file production_prompts.jsonl --concurrency 1,4,8
 ```
 
-JSONL format: one JSON object per line with a `"prompt"` key. The file is validated before the server is touched. Prompts are cycled across the concurrent requests of every cell (request *i* gets prompt `i mod N`), the cell's `prompt_type` is reported as `custom`, and `prompt_source`, `prompts_file` and `num_custom_prompts` are recorded in each result. The `--context-lengths` axis only labels the matrix in this mode: the real prompt length is whatever your file contains and is reported as `avg_prompt_tokens`.
+JSONL format: one JSON object per line with a `"prompt"` key. The file is validated (and parsed once) before the server is touched, and it is honoured by every mode, including `--rps` and `--traffic`. Prompts are cycled across the concurrent requests of every cell (request *i* gets prompt `i mod N`), the cell's `prompt_type` is reported as `custom`, and `prompt_source`, `prompts_file` and `num_custom_prompts` are recorded in each result. The `--context-lengths` axis only labels the matrix in this mode: the real prompt length is whatever your file contains and is reported as `avg_prompt_tokens`.
 
 ---
 

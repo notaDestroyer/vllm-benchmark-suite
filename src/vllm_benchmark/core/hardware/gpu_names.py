@@ -20,6 +20,7 @@ from typing import Iterable, Optional
 
 _SEP_RE = re.compile(r"[-_/,()]+")
 _COUNT_PREFIX_RE = re.compile(r"^\d+x$")
+_MEM_RE = re.compile(r"^\d+gb$")
 _NOISE_TOKENS = frozenset({"nvidia", "geforce", "tesla", "generation", "edition", "workstation", "hbm3", "hbm2e"})
 
 
@@ -47,36 +48,52 @@ def normalize_gpu_name(name: Optional[str]) -> list[str]:
     return out
 
 
+#: Key tokens that may be absent from a detected name without ruling the
+#: key out: form-factor / memory variants that nvidia-smi often omits
+#: ("NVIDIA H100 80GB HBM3" carries no "SXM").  Every other key token is a
+#: designator and must be present verbatim.
+_SOFT_TOKENS = frozenset({"sxm", "sxm4", "sxm5", "pcie", "nvl", "hbm3", "hbm2e"})
+
+
+def _is_soft(token: str) -> bool:
+    return token in _SOFT_TOKENS or bool(_MEM_RE.match(token))
+
+
 def _score(name_tokens: list[str], key_tokens: list[str]) -> Optional[float]:
     """Score how well ``key_tokens`` describe ``name_tokens`` (higher is better).
 
     Rules:
 
-    * The key's first token (the model designator, e.g. ``a100``) must
-      appear verbatim in the name; otherwise no match.  Exact-token
-      comparison means ``l4`` never matches ``l40s``.
-    * Score = number of key tokens present in the name, minus a small
-      penalty per key token that is absent, so ``"A100-80GB"`` beats
-      ``"A100-40GB"`` for an 80 GB card and ``"H100"`` ties with neither
-      ``"H100 SXM"`` nor ``"H100 PCIe"`` being contradicted.
-    * Key tokens that *contradict* the name (a different memory size
-      such as ``40gb`` when the name says ``80gb``) disqualify the key.
+    * Every *designator* token of the key (anything that is not a memory
+      size or a form-factor word, see :data:`_SOFT_TOKENS`) must appear
+      verbatim in the name; otherwise the key is rejected.  Exact-token
+      comparison means ``l4`` never matches ``l40s``, ``"RTX 4090"`` never
+      claims an RTX 3090 / 4080 / A6000, and ``"RTX 6000 Ada"`` never claims
+      a Quadro RTX 6000.
+    * Soft tokens (``80gb``, ``sxm``, ``pcie``) may be missing at a small
+      penalty, so ``"H100"`` / ``"H100 SXM"`` both fit ``"NVIDIA H100 80GB
+      HBM3"`` and ``"A100-80GB"`` still fits a bare ``"NVIDIA A100"``.
+    * A memory-size key token that *contradicts* the name (``40gb`` when
+      the name says ``80gb``) rejects the key.
+    * Score = tokens matched minus ``0.1`` per missing soft token.
     """
     if not key_tokens or not name_tokens:
         return None
     name_set = set(name_tokens)
-    if key_tokens[0] not in name_set:
-        return None
-    name_mem = {t for t in name_tokens if t.endswith("gb")}
+    name_mem = {t for t in name_tokens if _MEM_RE.match(t)}
     matched = 0
     missing = 0
     for tok in key_tokens:
         if tok in name_set:
             matched += 1
-        else:
-            if tok.endswith("gb") and name_mem and tok not in name_mem:
-                return None  # contradicting memory size
-            missing += 1
+            continue
+        if _MEM_RE.match(tok) and name_mem and tok not in name_mem:
+            return None  # contradicting memory size
+        if not _is_soft(tok):
+            return None  # designator absent: a different card
+        missing += 1
+    if matched == 0:
+        return None
     return matched - 0.1 * missing
 
 

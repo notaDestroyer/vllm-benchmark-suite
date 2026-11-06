@@ -10,10 +10,11 @@ License: MIT
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import time
 from statistics import mean, stdev
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import aiohttp
 import numpy as np
@@ -700,9 +701,23 @@ def _compute_stats(
 # ------------------------------------------------------------------
 
 _custom_prompt_cache: dict[str, list[str]] = {}
+#: Tokenizer-counted length per prompt, keyed by (prompts_file, model_name)
+#: then prompt index.  Filled lazily so each prompt is tokenized at most once
+#: per process no matter how many cells reuse it.
+_custom_prompt_token_cache: dict[tuple[str, str], dict[int, int]] = {}
 
 #: ``prompt_type`` label used in result cells when prompts come from a file.
 CUSTOM_PROMPT_TYPE = "custom"
+
+
+def prime_custom_prompts(path: str, prompts: List[str]) -> None:
+    """Seed the prompts-file cache with an already-loaded list.
+
+    The CLI validates the file before the run starts; priming avoids reading
+    and JSON-parsing it a second time on the first cell.
+    """
+    if prompts:
+        _custom_prompt_cache[path] = list(prompts)
 
 
 def resolve_prompts(
@@ -740,11 +755,57 @@ def resolve_prompts(
     return [prompt_gen(context_length, model_name or "")], prompt_type, "generated"
 
 
-def _mean_prompt_tokens(prompts: List[str], model_name: str) -> int:
-    """Average tokenizer-counted length of the prompts actually used."""
+def custom_prompt_generator(config: BenchmarkConfig) -> "Callable[[int, str], str]":
+    """Return a ``(target_tokens, model_name) -> str`` generator for a prompts file.
+
+    Drop-in for the synthetic generators used by the traffic simulator: it
+    ignores the requested token count and cycles through the file's prompts
+    in order (thread-safe; the simulator fires requests from a thread pool).
+    Requires ``config.prompts_file`` to be set.
+    """
+    prompts, _label, source = resolve_prompts(config, CUSTOM_PROMPT_TYPE, 0, "")
+    if source != "file":  # pragma: no cover - resolve_prompts raises first
+        raise ValueError("custom_prompt_generator requires config.prompts_file")
+    counter = itertools.count()
+
+    def _gen(_target_tokens: int, _model_name: str = "") -> str:
+        return _prompt_for(prompts, next(counter))
+
+    return _gen
+
+
+def _mean_prompt_tokens(
+    prompts: List[str],
+    model_name: str,
+    *,
+    cache_key: Optional[str] = None,
+    n_used: Optional[int] = None,
+) -> int:
+    """Average tokenizer-counted length of the prompts actually used.
+
+    Args:
+        prompts: The full prompt list for the run.
+        model_name: Tokenizer to count with.
+        cache_key: When set (the prompts-file path), per-prompt counts are
+            memoised in :data:`_custom_prompt_token_cache` so repeated cells
+            and sustained runs never re-tokenize the same prompt.
+        n_used: Number of requests that were (or will be) sent.  Only the
+            first ``min(n_used, len(prompts))`` prompts are counted, because
+            the engine cycles through the list in order; ``None`` counts them
+            all.
+    """
     if not prompts:
         return 0
-    counts = [count_tokens(p, model_name or "") for p in prompts]
+    limit = len(prompts) if n_used is None else max(1, min(n_used, len(prompts)))
+    if cache_key is None:
+        counts = [count_tokens(p, model_name or "") for p in prompts[:limit]]
+    else:
+        store = _custom_prompt_token_cache.setdefault((cache_key, model_name or ""), {})
+        counts = []
+        for i in range(limit):
+            if i not in store:
+                store[i] = count_tokens(prompts[i], model_name or "")
+            counts.append(store[i])
     return int(round(mean(counts)))
 
 
@@ -768,9 +829,13 @@ async def run_benchmark_async(
         print(f"{'=' * 100}")
 
     prompts, prompt_type, prompt_source = resolve_prompts(config, prompt_type, context_length, model_name or "")
-    # Only the prompts that will actually be sent count toward the average.
-    used = prompts[:num_concurrent_users] if len(prompts) > num_concurrent_users else prompts
-    actual_prompt_tokens = _mean_prompt_tokens(used, model_name or "")
+    # Only the prompts that will actually be sent count toward the average;
+    # counts for a prompts file are memoised across cells.
+    actual_prompt_tokens = _mean_prompt_tokens(
+        prompts, model_name or "",
+        cache_key=config.prompts_file if prompt_source == "file" else None,
+        n_used=num_concurrent_users,
+    )
 
     local_monitor = gpu_monitor if gpu_monitor else GPUMonitor(config.gpu_poll_interval)
     if not gpu_monitor:
@@ -816,7 +881,9 @@ async def run_sustained_benchmark(
     degrades under sustained load.
     """
     prompts, prompt_type, prompt_source = resolve_prompts(config, prompt_type, context_length, model_name or "")
-    actual_prompt_tokens = _mean_prompt_tokens(prompts, model_name or "")
+    # Token counting is deferred until after the run so only the prompts
+    # that were actually sent are tokenized (a sustained run against a
+    # large prompts file may use a small prefix of it).
 
     gpu_monitor = GPUMonitor(config.gpu_poll_interval)
     gpu_monitor.start()
@@ -835,6 +902,11 @@ async def run_sustained_benchmark(
     metrics_stats = metrics_monitor.stop()
 
     effective_users = int(target_rps * (mean([r["duration"] for r in results if r.get("success")]) if results else 1))
+    actual_prompt_tokens = _mean_prompt_tokens(
+        prompts, model_name or "",
+        cache_key=config.prompts_file if prompt_source == "file" else None,
+        n_used=len(results) or 1,
+    )
 
     stats = _compute_stats(
         results, total_time, context_length, max(effective_users, 1),

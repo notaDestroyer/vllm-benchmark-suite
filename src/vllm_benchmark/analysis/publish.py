@@ -15,10 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
-
-def _is_num(value: object) -> bool:
-    """True for finite int/float values (not bool, not None)."""
-    return isinstance(value, (int, float)) and not isinstance(value, bool)
+from vllm_benchmark.analysis.statistics import is_finite_number
 
 
 def _first_present(mapping: Dict, *keys: str):
@@ -53,10 +50,10 @@ def create_result_entry(
         return {}
 
     peak_tps = max(r["tokens_per_second"] for r in successful)
-    latencies = [r["avg_latency"] for r in successful if _is_num(r.get("avg_latency"))]
+    latencies = [r["avg_latency"] for r in successful if is_finite_number(r.get("avg_latency"))]
     best_latency = min(latencies) if latencies else None
     # ttft_estimate may be absent (embeddings) or None (non-streaming runs).
-    ttfts = [r["ttft_estimate"] for r in successful if _is_num(r.get("ttft_estimate"))]
+    ttfts = [r["ttft_estimate"] for r in successful if is_finite_number(r.get("ttft_estimate"))]
     best_ttft = min(ttfts) if ttfts else None
 
     # Cost if available
@@ -146,7 +143,7 @@ def format_leaderboard_row(entry: Dict) -> str:
         model = model[:27] + "..."
     tps = res.get("peak_throughput_tps") or 0
     ttft = res.get("best_ttft_ms")
-    ttft_str = f"{ttft:.0f}ms" if _is_num(ttft) else "N/A"
+    ttft_str = f"{ttft:.0f}ms" if is_finite_number(ttft) else "N/A"
     cost = res.get("cost_per_1m_tokens_usd")
     cost_str = f"${cost:.4f}" if cost else "N/A"
     grade = sc.get("grade", "-")

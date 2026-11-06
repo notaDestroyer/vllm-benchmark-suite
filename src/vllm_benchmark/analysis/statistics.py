@@ -13,6 +13,7 @@ License: MIT
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 import numpy as np
@@ -377,9 +378,18 @@ _CELL_KEYS = ("context_length", "concurrent_users", "prompt_type")
 _DROP_KEYS = ("iteration",)
 
 
-def _is_number(value: Any) -> bool:
-    """True for int/float (but not bool) values."""
+def is_number(value: Any) -> bool:
+    """True for int/float (but not bool) values, including NaN/inf."""
     return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def is_finite_number(value: Any) -> bool:
+    """True for int/float (but not bool) values that are finite."""
+    return is_number(value) and math.isfinite(value)
+
+
+# Internal alias kept for readability inside this module.
+_is_number = is_number
 
 
 def aggregate_iterations(

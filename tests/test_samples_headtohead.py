@@ -82,7 +82,10 @@ def test_metrics_compare_avg_latency_not_p99_under_wrong_label():
 
 def test_metric_sample_prefers_engine_lists():
     cell = _cell(6, latency=1.0, tps=10.0, ttft=0.1)
-    assert _metric_sample(cell, "tokens_per_second") == cell["request_tps_samples"]
+    # Aggregate throughput is never sampled from per-request rates; that is
+    # its own metric (request_tps).
+    assert _metric_sample(cell, "tokens_per_second") == [cell["tokens_per_second"]]
+    assert _metric_sample(cell, "request_tps") == cell["request_tps_samples"]
     assert _metric_sample(cell, "avg_latency") == cell["latency_samples"]
     assert _metric_sample(cell, "ttft_estimate") == cell["ttft_samples"]
     assert _metric_sample(cell, "prefill_tps") == cell["prefill_tps_samples"]
@@ -111,8 +114,12 @@ def test_head_to_head_finds_a_real_winner_from_engine_cells():
     assert m["avg_latency"]["winner"] == "b"
     assert m["ttft_estimate"]["winner"] == "b"
     assert m["decode_tps"]["winner"] == "b"
-    assert m["tokens_per_second"]["winner"] == "b"
-    assert m["tokens_per_second"]["n_a"] == 16
+    assert m["request_tps"]["winner"] == "b"
+    assert m["request_tps"]["n_a"] == 16
+    # Aggregate tokens_per_second has only a point estimate per side in a
+    # single-iteration run, so it is an honest tie.
+    assert m["tokens_per_second"]["tie"] and m["tokens_per_second"]["n_a"] == 1
+    assert m["tokens_per_second"]["tie_reason"] == "not_significant"
     # point_* carry the aggregate cell values; mean_* the sample means.
     assert m["tokens_per_second"]["point_a"] == a["tokens_per_second"]
     assert m["tokens_per_second"]["point_b"] == b["tokens_per_second"]

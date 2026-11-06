@@ -22,10 +22,15 @@ runs, the cross-iteration ``*_samples`` lists produced by
 sample list is present the point estimate is used and a tie is the honest
 default: a single value per side can never be statistically significant.
 
-Per-request throughput samples (``request_tps_samples``) are the spread
-behind the aggregate ``tokens_per_second``; the verdict dict therefore
+Per-request throughput (``request_tps``, from ``request_tps_samples``) is
+compared as its *own* metric: its mean is not the aggregate
+``tokens_per_second`` (an endpoint that fails half its requests can have a
+higher per-request rate and a lower aggregate), so the aggregate metric is
+only ever compared on cross-iteration samples of itself.  Every verdict
 reports both ``mean_a``/``mean_b`` (the sample means) and
-``point_a``/``point_b`` (the cell-level aggregate values).
+``point_a``/``point_b`` (the cell-level values), and a winner is withheld
+(``tie_reason = "direction_conflict"``) whenever the sample means and the
+point estimates disagree about which side is better.
 
 All functions here are pure (no I/O, no printing) and fully unit-testable
 on synthetic result dicts.
@@ -49,6 +54,7 @@ from vllm_benchmark.analysis.statistics import (
 #: Metrics compared per cell.  ``higher_is_better`` orients the winner.
 _METRICS: dict[str, dict[str, Any]] = {
     "tokens_per_second": {"higher_is_better": True},
+    "request_tps": {"higher_is_better": True},
     "ttft_estimate": {"higher_is_better": False},
     "prefill_tps": {"higher_is_better": True},
     "decode_tps": {"higher_is_better": True},
@@ -62,7 +68,8 @@ _METRICS: dict[str, dict[str, Any]] = {
 #: the engine's per-request lists because they sample the *same* statistic
 #: as the point estimate.
 _SAMPLE_SOURCES: dict[str, tuple[str, ...]] = {
-    "tokens_per_second": ("tokens_per_second_samples", "request_tps_samples"),
+    "tokens_per_second": ("tokens_per_second_samples",),
+    "request_tps": ("request_tps_samples",),
     "ttft_estimate": ("ttft_estimate_samples", "ttft_samples"),
     "prefill_tps": ("prefill_tps_samples",),
     "decode_tps": ("decode_tps_samples",),
@@ -124,12 +131,29 @@ def _metric_sample(cell: dict, metric: str) -> list[float]:
 
 
 def _point_estimate(cell: dict, metric: str) -> Optional[float]:
-    """Cell-level point estimate for ``metric`` (with key fallbacks)."""
+    """Cell-level point estimate for ``metric`` (with key fallbacks).
+
+    ``request_tps`` has no scalar in the cell; its point estimate is the
+    mean of the per-request samples.
+    """
     for key in (metric, *_POINT_FALLBACKS.get(metric, ())):
         val = cell.get(key)
         if val is not None:
             return float(val)
+    if metric == "request_tps":
+        raw = cell.get("request_tps_samples")
+        if isinstance(raw, (list, tuple)) and raw:
+            vals = [float(v) for v in raw if v is not None]
+            if vals:
+                return sum(vals) / len(vals)
     return None
+
+
+def _direction(a: Optional[float], b: Optional[float]) -> Optional[int]:
+    """Sign of ``a - b`` (``None`` when either side is missing or equal)."""
+    if a is None or b is None or a == b:
+        return None
+    return 1 if a > b else -1
 
 
 def _index_by_cell(results: list[dict]) -> dict[tuple, dict]:
@@ -169,7 +193,8 @@ def head_to_head(
         * ``label_a`` / ``label_b`` — endpoint labels.
         * ``cells`` — list of per-cell dicts, each ``{"cell", "metrics"}``
           where ``metrics`` maps a metric name to a verdict dict
-          (``winner`` in ``{"a", "b", None}``, ``tie``, ``cohens_d``,
+          (``winner`` in ``{"a", "b", None}``, ``tie``, ``tie_reason``
+          in ``{None, "not_significant", "direction_conflict"}``, ``cohens_d``,
           ``cliffs_delta``, ``welch_p``, ``adjusted_p``, ``ci_a``,
           ``ci_b``, ``n_a``, ``n_b``, ``mean_a``, ``mean_b``, ``point_a``,
           ``point_b``).
@@ -225,6 +250,18 @@ def head_to_head(
         ci_b = entry["ci_b"]
         overlap = cis_overlap(ci_a, ci_b)
         real = bool(cmp["real_difference"]) and adj_p < 0.05 and not overlap
+        tie_reason: Optional[str] = None
+        if not real:
+            tie_reason = "not_significant"
+        else:
+            # The samples and the cell-level point estimates must agree on
+            # who is ahead; otherwise the sample spread is not evidence
+            # about the headline number and we refuse to call a winner.
+            sample_dir = _direction(entry["mean_a"], entry["mean_b"])
+            point_dir = _direction(entry["point_a"], entry["point_b"])
+            if sample_dir is not None and point_dir is not None and sample_dir != point_dir:
+                real = False
+                tie_reason = "direction_conflict"
         tie = not real
 
         winner: Optional[str] = None
@@ -240,6 +277,7 @@ def head_to_head(
         cell_map[entry["cell"]][metric] = {
             "winner": winner,
             "tie": tie,
+            "tie_reason": tie_reason,
             "cohens_d": cmp["cohens_d"],
             "cliffs_delta": cmp["cliffs_delta"],
             "welch_p": cmp["welch_p"],

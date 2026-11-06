@@ -52,6 +52,18 @@
   roofline spec table; auto-detected cost is multiplied by the GPU count.
 - `gpu_spec` is initialised before the analysis stage so a failed analysis cannot
   leave it undefined for charts.
+- **Review follow-ups** — the GPU matcher requires every designator token, so an
+  RTX 3090 / 4080 / A6000 no longer resolves to the RTX 4090 baseline, price or
+  spec; `--prompts-file` is honoured by `--traffic` mode; head-to-head compares
+  per-request throughput as its own `request_tps` metric, never as a stand-in for
+  the aggregate, and withholds a winner (`tie_reason = "direction_conflict"`)
+  when sample means and point estimates disagree; auto-detected cost is billed
+  for the GPUs the server occupies (TP × PP) rather than the whole host; the
+  Prometheus parser tolerates timestamp suffixes and braces inside label values;
+  a stalled metrics poller can no longer leak peaks into a later window;
+  `publish` rejects NaN latency/TTFT via the shared `is_finite_number`; custom
+  prompt token counts are memoised per file and sustained runs count only the
+  prompts actually sent; the prompts file is parsed once.
 
 ### Added
 - `roofline_*.png` and `bottleneck_map_*.png` are written with every charted run.

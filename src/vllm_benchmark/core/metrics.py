@@ -27,15 +27,28 @@ def _parse_prom_line(line: str) -> Optional[tuple[str, float]]:
     line = line.strip()
     if not line or line.startswith("#"):
         return None
-    try:
-        head, value_str = line.rsplit(" ", 1)
-    except ValueError:
-        return None
-    name = head.split("{", 1)[0].strip()
+    # ``name[{labels}] value [timestamp]``.  Label values may contain spaces
+    # and braces inside quotes, so cut at the *last* closing brace rather
+    # than splitting on whitespace.
+    brace = line.find("{")
+    if brace != -1:
+        close = line.rfind("}")
+        if close < brace:
+            return None
+        name = line[:brace].strip()
+        rest = line[close + 1:]
+    else:
+        parts = line.split(None, 1)
+        if len(parts) < 2:
+            return None
+        name, rest = parts[0], parts[1]
     if not name:
         return None
+    tokens = rest.split()
+    if not tokens:
+        return None
     try:
-        return name, float(value_str)
+        return name, float(tokens[0])  # tokens[1], if any, is the timestamp
     except ValueError:
         return None
 
@@ -116,6 +129,10 @@ class MetricsMonitor:
         self.poll_interval = poll_interval
         self.baseline: Optional[Dict] = None
         self.available: bool = False
+        # Each measurement window owns its peaks dict and stop event; the
+        # poller thread captures *those* objects, so a thread that outlives
+        # stop() (stuck in a slow HTTP call) can only write into the window
+        # it was started for and can never leak into a later one.
         self._peaks: Dict[str, Optional[float]] = {k: None for k in _GAUGE_ALIASES}
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
@@ -147,20 +164,25 @@ class MetricsMonitor:
         except Exception:
             return None
 
-    def _record_peaks(self, stats: Dict) -> None:
+    @staticmethod
+    def _record_peaks_into(peaks: Dict[str, Optional[float]], stats: Dict) -> None:
         for key in _GAUGE_ALIASES:
             val = stats.get(key)
             if val is None:
                 continue
-            cur = self._peaks.get(key)
-            self._peaks[key] = val if cur is None else max(cur, val)
+            cur = peaks.get(key)
+            peaks[key] = val if cur is None else max(cur, val)
 
-    def _poll_loop(self) -> None:
-        while not self._stop_event.is_set():
+    def _record_peaks(self, stats: Dict) -> None:
+        self._record_peaks_into(self._peaks, stats)
+
+    def _poll_loop(self, peaks: Dict[str, Optional[float]], stop_event: threading.Event) -> None:
+        """Background sampler bound to one window's ``peaks`` / ``stop_event``."""
+        while not stop_event.is_set():
             stats = self.get_metrics()
-            if stats:
-                self._record_peaks(stats)
-            self._stop_event.wait(self.poll_interval)
+            if stats and not stop_event.is_set():
+                self._record_peaks_into(peaks, stats)
+            stop_event.wait(self.poll_interval)
 
     # ------------------------------------------------------------------
     # Public start / stop interface
@@ -176,12 +198,18 @@ class MetricsMonitor:
         if not stats:
             self.available = False
             return False
+        # Retire any previous window's poller before opening a new one.
+        self._stop_event.set()
+        if self._thread is not None and self._thread.is_alive():
+            self._thread.join(timeout=self.poll_interval + 0.5)
         self.baseline = stats
         self.available = True
         self._peaks = {k: None for k in _GAUGE_ALIASES}
+        self._stop_event = threading.Event()
         self._record_peaks(stats)
-        self._stop_event.clear()
-        self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._thread = threading.Thread(
+            target=self._poll_loop, args=(self._peaks, self._stop_event), daemon=True,
+        )
         self._thread.start()
         return True
 
@@ -197,7 +225,10 @@ class MetricsMonitor:
         self._stop_event.set()
         if self._thread is not None:
             self._thread.join(timeout=max(self.poll_interval, 2.0) + 2.0)
-            self._thread = None
+            if not self._thread.is_alive():
+                self._thread = None
+            # else: keep the reference; the thread is bound to this window's
+            # (now stopped) event and peaks dict and will exit on its own.
 
         if not self.available or self.baseline is None:
             return None

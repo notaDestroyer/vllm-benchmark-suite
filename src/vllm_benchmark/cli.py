@@ -425,6 +425,18 @@ def _run_compare_quants(paths: list[str], output_dir: str) -> None:
     console.print(f"[green]JSON:[/green]  {json_path}")
 
 
+def _billable_gpus(server_info, system_info: dict) -> int:
+    """GPUs to charge for: server TP x PP when known, else host GPU count, else 1."""
+    tp = getattr(server_info, "tensor_parallel", None)
+    pp = getattr(server_info, "pipeline_parallel", None)
+    if tp or pp:
+        return max(1, int(tp or 1)) * max(1, int(pp or 1))
+    try:
+        return max(1, int(system_info.get("gpu_count") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
 def _run_leaderboard(results_dir: str) -> str:
     """Render the community leaderboard from ``result_*.json`` files.
 
@@ -595,17 +607,18 @@ def main():
     if args.prompts_file:
         # Validate up front so a bad file fails before the server is touched,
         # and collapse the prompt-type axis: every cell uses the file.
-        from vllm_benchmark.core.async_engine import CUSTOM_PROMPT_TYPE
+        from vllm_benchmark.core.async_engine import CUSTOM_PROMPT_TYPE, prime_custom_prompts
         from vllm_benchmark.core.prompts import load_custom_prompts
         try:
-            n_custom = len(load_custom_prompts(args.prompts_file))
+            custom_prompts = load_custom_prompts(args.prompts_file)
         except Exception as exc:
             console.print(f"[red]Cannot load --prompts-file {args.prompts_file}: {exc}[/red]")
             sys.exit(2)
-        if n_custom == 0:
+        if not custom_prompts:
             console.print(f"[red]--prompts-file {args.prompts_file} contains no prompts[/red]")
             sys.exit(2)
         config.prompts_file = args.prompts_file
+        prime_custom_prompts(args.prompts_file, custom_prompts)  # parsed once, reused by the engine
         config.prompt_types = [CUSTOM_PROMPT_TYPE]
         if args.prompt_type:
             console.print("[yellow]--prompt-type is ignored when --prompts-file is given[/yellow]")
@@ -660,8 +673,10 @@ def main():
         from vllm_benchmark.core.hardware.gpu_names import match_gpu_key
         pricing_key = match_gpu_key(system_info.get("gpu_name"), GPU_PRICING.keys())
         if pricing_key is not None:
-            # Pricing is per GPU; a multi-GPU host costs gpu_count times as much.
-            cost_per_hour = GPU_PRICING[pricing_key] * max(1, int(system_info.get("gpu_count") or 1))
+            # Pricing is per GPU.  Bill the GPUs the *server* occupies
+            # (tensor x pipeline parallel) when it reports them; only fall
+            # back to the whole host when the parallelism is unknown.
+            cost_per_hour = GPU_PRICING[pricing_key] * _billable_gpus(backend_server_info, system_info)
 
     # Display system panel
     sys_table = Table(show_header=False, box=box.ROUNDED, border_style="green")
@@ -704,6 +719,14 @@ def main():
         from vllm_benchmark.core.prompts import generate_prompt
         from vllm_benchmark.core.traffic import TrafficConfig, format_traffic_report, run_multiturn_traffic, run_poisson_traffic
 
+        # Honour --prompts-file here too: the simulator takes any
+        # (target_tokens, model_name) -> str callable.
+        if config.prompts_file:
+            from vllm_benchmark.core.async_engine import custom_prompt_generator
+            prompt_generator = custom_prompt_generator(config)
+        else:
+            prompt_generator = generate_prompt
+
         traffic_config = TrafficConfig(
             target_rps=args.target_rps,
             duration_seconds=args.traffic_duration,
@@ -721,11 +744,11 @@ def main():
 
         if args.traffic == "multiturn":
             traffic_result = run_multiturn_traffic(
-                traffic_config, model_name, config.api_endpoint, generate_prompt, config.request_timeout,
+                traffic_config, model_name, config.api_endpoint, prompt_generator, config.request_timeout,
             )
         else:
             traffic_result = run_poisson_traffic(
-                traffic_config, model_name, config.api_endpoint, generate_prompt, config.request_timeout,
+                traffic_config, model_name, config.api_endpoint, prompt_generator, config.request_timeout,
             )
 
         report = format_traffic_report(traffic_result, traffic_config)
