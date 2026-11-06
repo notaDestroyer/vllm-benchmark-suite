@@ -14,11 +14,23 @@ bootstrap confidence intervals of the two means do not overlap.  Otherwise
 the cell/metric is reported as a **tie** — the module never fabricates an
 unsupported "X is faster" claim.
 
-Because a single benchmark cell usually yields one aggregate value per
-metric, samples are drawn from the per-cell distribution where available
-(``*_samples`` / percentile fields) and fall back to the point estimate;
-ties are the honest default when there is not enough spread to separate
-the endpoints.
+Samples are drawn from the per-cell raw sample lists that the engine
+emits (``latency_samples``, ``ttft_samples``, ``prefill_tps_samples``,
+``decode_tps_samples``, ``request_tps_samples``) or, for multi-iteration
+runs, the cross-iteration ``*_samples`` lists produced by
+:func:`~vllm_benchmark.analysis.statistics.aggregate_iterations`.  When no
+sample list is present the point estimate is used and a tie is the honest
+default: a single value per side can never be statistically significant.
+
+Per-request throughput (``request_tps``, from ``request_tps_samples``) is
+compared as its *own* metric: its mean is not the aggregate
+``tokens_per_second`` (an endpoint that fails half its requests can have a
+higher per-request rate and a lower aggregate), so the aggregate metric is
+only ever compared on cross-iteration samples of itself.  Every verdict
+reports both ``mean_a``/``mean_b`` (the sample means) and
+``point_a``/``point_b`` (the cell-level values), and a winner is withheld
+(``tie_reason = "direction_conflict"``) whenever the sample means and the
+point estimates disagree about which side is better.
 
 All functions here are pure (no I/O, no printing) and fully unit-testable
 on synthetic result dicts.
@@ -33,28 +45,41 @@ from typing import Any, Optional
 
 from vllm_benchmark.analysis.statistics import (
     bootstrap_ci,
+    cis_overlap,
     compare_groups,
     holm_adjusted_p,
+    point_ci,
 )
 
 #: Metrics compared per cell.  ``higher_is_better`` orients the winner.
 _METRICS: dict[str, dict[str, Any]] = {
     "tokens_per_second": {"higher_is_better": True},
+    "request_tps": {"higher_is_better": True},
     "ttft_estimate": {"higher_is_better": False},
     "prefill_tps": {"higher_is_better": True},
     "decode_tps": {"higher_is_better": True},
-    "latency_p99": {"higher_is_better": False},
+    "avg_latency": {"higher_is_better": False},
 }
 
 #: Per-metric candidate sample sources, tried in order.  The first source
 #: that yields a non-empty list of values wins; otherwise the point
-#: estimate (single value) is used.
+#: estimate (single value) is used.  Cross-iteration lists
+#: (``<metric>_samples`` from ``aggregate_iterations``) are preferred over
+#: the engine's per-request lists because they sample the *same* statistic
+#: as the point estimate.
 _SAMPLE_SOURCES: dict[str, tuple[str, ...]] = {
     "tokens_per_second": ("tokens_per_second_samples",),
-    "ttft_estimate": ("ttft_samples", "ttft_estimate_samples"),
+    "request_tps": ("request_tps_samples",),
+    "ttft_estimate": ("ttft_estimate_samples", "ttft_samples"),
     "prefill_tps": ("prefill_tps_samples",),
     "decode_tps": ("decode_tps_samples",),
-    "latency_p99": ("latency_samples",),
+    "avg_latency": ("avg_latency_samples", "latency_samples"),
+}
+
+#: Point-estimate fallbacks when the primary metric key is absent.
+_POINT_FALLBACKS: dict[str, tuple[str, ...]] = {
+    "prefill_tps": ("prefill_tps_mean", "prefill_tps_p50"),
+    "decode_tps": ("decode_tps_mean", "decode_tps_p50"),
 }
 
 
@@ -96,11 +121,39 @@ def _metric_sample(cell: dict, metric: str) -> list[float]:
     for source in _SAMPLE_SOURCES.get(metric, ()):  # explicit sample lists
         raw = cell.get(source)
         if isinstance(raw, (list, tuple)) and raw:
-            return [float(v) for v in raw if v is not None]
-    val = cell.get(metric)
+            vals = [float(v) for v in raw if v is not None]
+            if vals:
+                return vals
+    val = _point_estimate(cell, metric)
     if val is None:
         return []
     return [float(val)]
+
+
+def _point_estimate(cell: dict, metric: str) -> Optional[float]:
+    """Cell-level point estimate for ``metric`` (with key fallbacks).
+
+    ``request_tps`` has no scalar in the cell; its point estimate is the
+    mean of the per-request samples.
+    """
+    for key in (metric, *_POINT_FALLBACKS.get(metric, ())):
+        val = cell.get(key)
+        if val is not None:
+            return float(val)
+    if metric == "request_tps":
+        raw = cell.get("request_tps_samples")
+        if isinstance(raw, (list, tuple)) and raw:
+            vals = [float(v) for v in raw if v is not None]
+            if vals:
+                return sum(vals) / len(vals)
+    return None
+
+
+def _direction(a: Optional[float], b: Optional[float]) -> Optional[int]:
+    """Sign of ``a - b`` (``None`` when either side is missing or equal)."""
+    if a is None or b is None or a == b:
+        return None
+    return 1 if a > b else -1
 
 
 def _index_by_cell(results: list[dict]) -> dict[tuple, dict]:
@@ -140,9 +193,11 @@ def head_to_head(
         * ``label_a`` / ``label_b`` — endpoint labels.
         * ``cells`` — list of per-cell dicts, each ``{"cell", "metrics"}``
           where ``metrics`` maps a metric name to a verdict dict
-          (``winner`` in ``{"a", "b", None}``, ``tie``, ``cohens_d``,
+          (``winner`` in ``{"a", "b", None}``, ``tie``, ``tie_reason``
+          in ``{None, "not_significant", "direction_conflict"}``, ``cohens_d``,
           ``cliffs_delta``, ``welch_p``, ``adjusted_p``, ``ci_a``,
-          ``ci_b``, ``n_a``, ``n_b``, ``mean_a``, ``mean_b``).
+          ``ci_b``, ``n_a``, ``n_b``, ``mean_a``, ``mean_b``, ``point_a``,
+          ``point_b``).
         * ``summary`` — per-metric win counts ``{"a", "b", "tie"}``.
         * ``n_matched_cells`` — number of matched cells.
         * ``n_comparisons`` — number of Holm-corrected comparisons.
@@ -164,8 +219,8 @@ def head_to_head(
             a_vals = _metric_sample(cell_a, metric)
             b_vals = _metric_sample(cell_b, metric)
             cmp = compare_groups(a_vals, b_vals)
-            ci_a = bootstrap_ci(a_vals, seed=0) if len(a_vals) > 1 else _point_ci(a_vals)
-            ci_b = bootstrap_ci(b_vals, seed=0) if len(b_vals) > 1 else _point_ci(b_vals)
+            ci_a = bootstrap_ci(a_vals, seed=0) if len(a_vals) > 1 else point_ci(a_vals)
+            ci_b = bootstrap_ci(b_vals, seed=0) if len(b_vals) > 1 else point_ci(b_vals)
             raw.append({
                 "cell": key,
                 "metric": metric,
@@ -177,6 +232,8 @@ def head_to_head(
                 "n_b": len(b_vals),
                 "mean_a": (sum(a_vals) / len(a_vals)) if a_vals else None,
                 "mean_b": (sum(b_vals) / len(b_vals)) if b_vals else None,
+                "point_a": _point_estimate(cell_a, metric),
+                "point_b": _point_estimate(cell_b, metric),
             })
 
     adjusted = holm_adjusted_p([r["compare"]["welch_p"] for r in raw])
@@ -191,8 +248,20 @@ def head_to_head(
         cmp = entry["compare"]
         ci_a = entry["ci_a"]
         ci_b = entry["ci_b"]
-        cis_overlap = _cis_overlap(ci_a, ci_b)
-        real = bool(cmp["real_difference"]) and adj_p < 0.05 and not cis_overlap
+        overlap = cis_overlap(ci_a, ci_b)
+        real = bool(cmp["real_difference"]) and adj_p < 0.05 and not overlap
+        tie_reason: Optional[str] = None
+        if not real:
+            tie_reason = "not_significant"
+        else:
+            # The samples and the cell-level point estimates must agree on
+            # who is ahead; otherwise the sample spread is not evidence
+            # about the headline number and we refuse to call a winner.
+            sample_dir = _direction(entry["mean_a"], entry["mean_b"])
+            point_dir = _direction(entry["point_a"], entry["point_b"])
+            if sample_dir is not None and point_dir is not None and sample_dir != point_dir:
+                real = False
+                tie_reason = "direction_conflict"
         tie = not real
 
         winner: Optional[str] = None
@@ -208,6 +277,7 @@ def head_to_head(
         cell_map[entry["cell"]][metric] = {
             "winner": winner,
             "tie": tie,
+            "tie_reason": tie_reason,
             "cohens_d": cmp["cohens_d"],
             "cliffs_delta": cmp["cliffs_delta"],
             "welch_p": cmp["welch_p"],
@@ -218,6 +288,8 @@ def head_to_head(
             "n_b": entry["n_b"],
             "mean_a": entry["mean_a"],
             "mean_b": entry["mean_b"],
+            "point_a": entry["point_a"],
+            "point_b": entry["point_b"],
         }
 
     cells = [
@@ -233,32 +305,3 @@ def head_to_head(
         "n_matched_cells": len(matched_keys),
         "n_comparisons": len(raw),
     }
-
-
-# ---------------------------------------------------------------------------
-# Small numeric helpers (pure)
-# ---------------------------------------------------------------------------
-
-def _point_ci(values: list[float]) -> tuple[float, float, float]:
-    """Return a degenerate ``(low, point, high)`` for 0/1-length samples."""
-    if not values:
-        return (0.0, 0.0, 0.0)
-    v = float(values[0])
-    return (v, v, v)
-
-
-def _cis_overlap(
-    ci_a: tuple[float, float, float],
-    ci_b: tuple[float, float, float],
-) -> bool:
-    """Whether two ``(low, point, high)`` intervals overlap.
-
-    Empty/degenerate intervals (all zeros) are treated as non-informative
-    and therefore *do* overlap (forcing a tie), so a winner is never
-    claimed without real interval evidence.
-    """
-    low_a, _, high_a = ci_a
-    low_b, _, high_b = ci_b
-    if (low_a, high_a) == (0.0, 0.0) or (low_b, high_b) == (0.0, 0.0):
-        return True
-    return not (high_a < low_b or high_b < low_a)

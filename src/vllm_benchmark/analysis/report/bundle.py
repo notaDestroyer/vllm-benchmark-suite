@@ -28,6 +28,8 @@ import json
 import re
 from typing import Any, Optional
 
+from vllm_benchmark.analysis.bottleneck import top_verdict
+
 #: Maximum length for any sanitized server-derived string.
 _MAX_STR_LEN = 200
 
@@ -177,10 +179,9 @@ def _summarize_model_profile(profile: Optional[dict]) -> Optional[dict]:
 def _summarize_bottlenecks(bottlenecks: Optional[list[dict]]) -> dict:
     """Carry the bottleneck verdicts (governing + per-cell facts)."""
     verdicts = bottlenecks or []
-    order = {"high": 0, "medium": 1, "low": 2}
     governing: Optional[dict] = None
-    if verdicts:
-        top = min(verdicts, key=lambda v: order.get(v.get("confidence"), 3))
+    top = top_verdict(verdicts)
+    if top is not None:
         governing = {
             "primary": top.get("primary"),
             "lever": sanitize_text(top.get("lever"), max_len=300),
@@ -254,9 +255,23 @@ def _summarize_quality(quality: Optional[dict]) -> Optional[dict]:
         "mode": sanitize_text(quality.get("mode")),
         "status": sanitize_text(quality.get("status")),
     }
-    for key in ("score", "perplexity", "kl_divergence"):
+    # Every numeric fact the quality modes emit, so the analyst can cite
+    # them and the verifier accepts them:
+    #   probe      -> score, passed, total, overall_ci_low/high
+    #   perplexity -> perplexity, n_samples, n_tokens
+    #   kl         -> mean_kl, top1_agreement, n_positions
+    for key in (
+        "score", "passed", "total", "overall_ci_low", "overall_ci_high",
+        "perplexity", "n_samples", "n_tokens",
+        "mean_kl", "top1_agreement", "n_positions",
+    ):
         if quality.get(key) is not None:
             out[key] = _round(quality.get(key))
+    # Legacy alias some consumers used before the key was unified.
+    if quality.get("kl_divergence") is not None and "mean_kl" not in out:
+        out["mean_kl"] = _round(quality.get("kl_divergence"))
+    if quality.get("tokenizer_mismatch") is not None:
+        out["tokenizer_mismatch"] = bool(quality.get("tokenizer_mismatch"))
     if quality.get("reason"):
         out["reason"] = sanitize_text(quality.get("reason"), max_len=300)
     return out
@@ -268,19 +283,23 @@ def _summarize_score(score: Any) -> Optional[dict]:
         return None
     if hasattr(score, "to_dict"):
         score = score.to_dict()
-    if isinstance(score, dict):
-        return {
-            "overall": _round(score.get("overall"), 2),
-            "grade": sanitize_text(score.get("grade")),
-            "throughput": _round(score.get("throughput"), 2),
-            "latency": _round(score.get("latency"), 2),
-            "efficiency": _round(score.get("efficiency"), 2),
+    elif not isinstance(score, dict):
+        # Generic dataclass / object without to_dict: read its attributes.
+        score = {
+            k: getattr(score, k, None)
+            for k in ("overall", "grade", "throughput", "latency", "efficiency",
+                      "energy", "consistency", "gpu_match", "gpu_percentile")
         }
-    # Fall back to attribute access for a dataclass without to_dict.
-    return {
-        "overall": _round(getattr(score, "overall", None), 2),
-        "grade": sanitize_text(getattr(score, "grade", None)),
+    out: dict[str, Any] = {
+        "overall": _round(score.get("overall"), 2),
+        "grade": sanitize_text(score.get("grade")),
     }
+    for key in ("throughput", "latency", "efficiency", "energy", "consistency", "gpu_percentile"):
+        if score.get(key) is not None:
+            out[key] = _round(score.get(key), 2)
+    if score.get("gpu_match"):
+        out["gpu_match"] = sanitize_text(score.get("gpu_match"))
+    return out
 
 
 def _lowest_cost(results: list[dict]) -> Optional[float]:

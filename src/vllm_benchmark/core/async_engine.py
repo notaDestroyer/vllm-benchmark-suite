@@ -10,10 +10,11 @@ License: MIT
 from __future__ import annotations
 
 import asyncio
+import itertools
 import json
 import time
 from statistics import mean, stdev
-from typing import Dict, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import aiohttp
 import numpy as np
@@ -21,7 +22,7 @@ from rich.console import Console
 
 from vllm_benchmark.config import BenchmarkConfig
 from vllm_benchmark.core.metrics import GPUMonitor, MetricsMonitor
-from vllm_benchmark.core.prompts import get_prompt_generator
+from vllm_benchmark.core.prompts import get_prompt_generator, load_custom_prompts
 
 console = Console()
 
@@ -321,20 +322,38 @@ async def _warmup_connection(
         pass
 
 
+def _prompt_for(prompts: "str | List[str]", request_id: int) -> str:
+    """Pick the prompt for ``request_id``.
+
+    A single string is used for every request (the classic generated-prompt
+    path).  A list (custom ``--prompts-file``) is cycled so that request
+    *i* gets ``prompts[i % len(prompts)]``.
+    """
+    if isinstance(prompts, str):
+        return prompts
+    if not prompts:
+        raise ValueError("prompts list is empty")
+    return prompts[request_id % len(prompts)]
+
+
 async def _run_burst(
-    prompt: str,
+    prompts: "str | List[str]",
     num_concurrent: int,
     config: BenchmarkConfig,
     model_name: str,
 ) -> List[Dict]:
-    """Fire all requests simultaneously and collect results."""
+    """Fire all requests simultaneously and collect results.
+
+    ``prompts`` is either one prompt string shared by all requests, or a
+    list of prompts that is cycled across the concurrent requests.
+    """
     connector = aiohttp.TCPConnector(limit=num_concurrent + 10)
     async with aiohttp.ClientSession(connector=connector) as session:
         # Connection warmup — establish the pool before the measured burst.
         await _warmup_connection(session, config, model_name)
         tasks = [
             _make_async_request(
-                session, prompt, i, config.output_tokens, model_name,
+                session, _prompt_for(prompts, i), i, config.output_tokens, model_name,
                 config.api_endpoint, config.request_timeout, config.streaming,
             )
             for i in range(num_concurrent)
@@ -433,7 +452,7 @@ async def run_decode_probe(
 # ------------------------------------------------------------------
 
 async def _run_sustained_rps(
-    prompt: str,
+    prompts: "str | List[str]",
     target_rps: float,
     duration_seconds: float,
     config: BenchmarkConfig,
@@ -462,7 +481,7 @@ async def _run_sustained_rps(
             if now >= next_send:
                 task = asyncio.create_task(
                     _make_async_request(
-                        session, prompt, request_id, config.output_tokens,
+                        session, _prompt_for(prompts, request_id), request_id, config.output_tokens,
                         model_name, config.api_endpoint, config.request_timeout,
                         config.streaming,
                     )
@@ -603,6 +622,23 @@ def _compute_stats(
         result_dict["itl_p95"] = itl_percentiles.get("p95", 0)
         result_dict["itl_p99"] = itl_percentiles.get("p99", 0)
 
+    # Raw per-request samples.  These give downstream A/B comparisons
+    # (``--vs``, ``--compare-quants``) real within-cell spread instead of a
+    # single point estimate, so hypothesis tests can actually reject.
+    # ``request_tps_samples`` is *per-request* throughput
+    # (completion_tokens / duration); the cell-level ``tokens_per_second``
+    # remains the aggregate (sum of tokens / wall time).
+    result_dict["latency_samples"] = [float(d) for d in durations]
+    if ttft_values:
+        result_dict["ttft_samples"] = [float(t) for t in ttft_values]
+    request_tps = [
+        r["completion_tokens"] / r["duration"]
+        for r in successful
+        if r.get("duration") and r["duration"] > 0 and r.get("completion_tokens")
+    ]
+    if request_tps:
+        result_dict["request_tps_samples"] = [float(v) for v in request_tps]
+
     # Prefill / decode (pp/tg) throughput split — only present when the
     # client-side streaming parser could derive real per-phase numbers.
     sources = {r.get("pp_tg_source") for r in successful if r.get("pp_tg_source")}
@@ -614,6 +650,9 @@ def _compute_stats(
     prefill_values = [r.get("prefill_tps") for r in successful if r.get("prefill_tps") is not None]
     if prefill_values:
         prefill_percentiles = calculate_percentiles(prefill_values)
+        result_dict["prefill_tps_samples"] = [float(v) for v in prefill_values]
+        # Plain ``prefill_tps`` is the cell-level point estimate (== mean).
+        result_dict["prefill_tps"] = mean(prefill_values)
         result_dict["prefill_tps_mean"] = mean(prefill_values)
         result_dict["prefill_tps_p50"] = prefill_percentiles.get("p50", 0)
         result_dict["prefill_tps_p90"] = prefill_percentiles.get("p90", 0)
@@ -622,6 +661,8 @@ def _compute_stats(
     decode_values = [r.get("decode_tps") for r in successful if r.get("decode_tps") is not None]
     if decode_values:
         decode_percentiles = calculate_percentiles(decode_values)
+        result_dict["decode_tps_samples"] = [float(v) for v in decode_values]
+        result_dict["decode_tps"] = mean(decode_values)
         result_dict["decode_tps_mean"] = mean(decode_values)
         result_dict["decode_tps_p50"] = decode_percentiles.get("p50", 0)
         result_dict["decode_tps_p90"] = decode_percentiles.get("p90", 0)
@@ -655,6 +696,119 @@ def _compute_stats(
     return result_dict
 
 
+# ------------------------------------------------------------------
+# Prompt resolution (generated vs. custom --prompts-file)
+# ------------------------------------------------------------------
+
+_custom_prompt_cache: dict[str, list[str]] = {}
+#: Tokenizer-counted length per prompt, keyed by (prompts_file, model_name)
+#: then prompt index.  Filled lazily so each prompt is tokenized at most once
+#: per process no matter how many cells reuse it.
+_custom_prompt_token_cache: dict[tuple[str, str], dict[int, int]] = {}
+
+#: ``prompt_type`` label used in result cells when prompts come from a file.
+CUSTOM_PROMPT_TYPE = "custom"
+
+
+def prime_custom_prompts(path: str, prompts: List[str]) -> None:
+    """Seed the prompts-file cache with an already-loaded list.
+
+    The CLI validates the file before the run starts; priming avoids reading
+    and JSON-parsing it a second time on the first cell.
+    """
+    if prompts:
+        _custom_prompt_cache[path] = list(prompts)
+
+
+def resolve_prompts(
+    config: BenchmarkConfig,
+    prompt_type: str,
+    context_length: int,
+    model_name: str,
+) -> "tuple[list[str], str, str]":
+    """Return ``(prompts, prompt_type_label, prompt_source)`` for a run.
+
+    When ``config.prompts_file`` is set the JSONL file is loaded (once per
+    path and cached) and *all* of its prompts are returned so the engine can
+    cycle through them; the label is :data:`CUSTOM_PROMPT_TYPE` and the
+    source is ``"file"``.  Otherwise a single synthetic prompt of
+    ``context_length`` tokens is generated with the ``prompt_type``
+    strategy and the source is ``"generated"``.
+
+    Raises:
+        FileNotFoundError / KeyError / ValueError: propagated from
+        :func:`load_custom_prompts` so a bad file fails loudly rather than
+        silently falling back to synthetic prompts.
+    """
+    path = getattr(config, "prompts_file", None)
+    if path:
+        if path not in _custom_prompt_cache:
+            prompts = load_custom_prompts(path)
+            if not prompts:
+                raise ValueError(f"No prompts found in {path}")
+            _custom_prompt_cache[path] = prompts
+        return list(_custom_prompt_cache[path]), CUSTOM_PROMPT_TYPE, "file"
+
+    if prompt_type == CUSTOM_PROMPT_TYPE:
+        raise ValueError("prompt_type 'custom' requires config.prompts_file to be set")
+    prompt_gen = get_prompt_generator(prompt_type)
+    return [prompt_gen(context_length, model_name or "")], prompt_type, "generated"
+
+
+def custom_prompt_generator(config: BenchmarkConfig) -> "Callable[[int, str], str]":
+    """Return a ``(target_tokens, model_name) -> str`` generator for a prompts file.
+
+    Drop-in for the synthetic generators used by the traffic simulator: it
+    ignores the requested token count and cycles through the file's prompts
+    in order (thread-safe; the simulator fires requests from a thread pool).
+    Requires ``config.prompts_file`` to be set.
+    """
+    prompts, _label, source = resolve_prompts(config, CUSTOM_PROMPT_TYPE, 0, "")
+    if source != "file":  # pragma: no cover - resolve_prompts raises first
+        raise ValueError("custom_prompt_generator requires config.prompts_file")
+    counter = itertools.count()
+
+    def _gen(_target_tokens: int, _model_name: str = "") -> str:
+        return _prompt_for(prompts, next(counter))
+
+    return _gen
+
+
+def _mean_prompt_tokens(
+    prompts: List[str],
+    model_name: str,
+    *,
+    cache_key: Optional[str] = None,
+    n_used: Optional[int] = None,
+) -> int:
+    """Average tokenizer-counted length of the prompts actually used.
+
+    Args:
+        prompts: The full prompt list for the run.
+        model_name: Tokenizer to count with.
+        cache_key: When set (the prompts-file path), per-prompt counts are
+            memoised in :data:`_custom_prompt_token_cache` so repeated cells
+            and sustained runs never re-tokenize the same prompt.
+        n_used: Number of requests that were (or will be) sent.  Only the
+            first ``min(n_used, len(prompts))`` prompts are counted, because
+            the engine cycles through the list in order; ``None`` counts them
+            all.
+    """
+    if not prompts:
+        return 0
+    limit = len(prompts) if n_used is None else max(1, min(n_used, len(prompts)))
+    if cache_key is None:
+        counts = [count_tokens(p, model_name or "") for p in prompts[:limit]]
+    else:
+        store = _custom_prompt_token_cache.setdefault((cache_key, model_name or ""), {})
+        counts = []
+        for i in range(limit):
+            if i not in store:
+                store[i] = count_tokens(prompts[i], model_name or "")
+            counts.append(store[i])
+    return int(round(mean(counts)))
+
+
 async def run_benchmark_async(
     context_length: int,
     num_concurrent_users: int,
@@ -674,9 +828,14 @@ async def run_benchmark_async(
         print(f"Testing: {context_length:,} token context | {num_concurrent_users} concurrent users | {prompt_type} prompt")
         print(f"{'=' * 100}")
 
-    prompt_gen = get_prompt_generator(prompt_type)
-    prompt = prompt_gen(context_length, model_name or "")
-    actual_prompt_tokens = count_tokens(prompt, model_name or "")
+    prompts, prompt_type, prompt_source = resolve_prompts(config, prompt_type, context_length, model_name or "")
+    # Only the prompts that will actually be sent count toward the average;
+    # counts for a prompts file are memoised across cells.
+    actual_prompt_tokens = _mean_prompt_tokens(
+        prompts, model_name or "",
+        cache_key=config.prompts_file if prompt_source == "file" else None,
+        n_used=num_concurrent_users,
+    )
 
     local_monitor = gpu_monitor if gpu_monitor else GPUMonitor(config.gpu_poll_interval)
     if not gpu_monitor:
@@ -686,7 +845,7 @@ async def run_benchmark_async(
     metrics_monitor.start()
 
     start_time = time.perf_counter()
-    results = await _run_burst(prompt, num_concurrent_users, config, model_name)
+    results = await _run_burst(prompts, num_concurrent_users, config, model_name)
     end_time = time.perf_counter()
     total_time = end_time - start_time
 
@@ -695,10 +854,16 @@ async def run_benchmark_async(
         gpu_stats = local_monitor.stop(window_start=start_time, window_end=end_time)
     metrics_stats = metrics_monitor.stop()
 
-    return _compute_stats(
+    stats = _compute_stats(
         list(results), total_time, context_length, num_concurrent_users,
         prompt_type, actual_prompt_tokens, gpu_stats, metrics_stats, cost_per_hour,
     )
+    if stats:
+        stats["prompt_source"] = prompt_source
+        if prompt_source == "file":
+            stats["prompts_file"] = config.prompts_file
+            stats["num_custom_prompts"] = len(prompts)
+    return stats
 
 
 async def run_sustained_benchmark(
@@ -715,9 +880,10 @@ async def run_sustained_benchmark(
     Launches requests at a steady rate and measures how latency
     degrades under sustained load.
     """
-    prompt_gen = get_prompt_generator(prompt_type)
-    prompt = prompt_gen(context_length, model_name or "")
-    actual_prompt_tokens = count_tokens(prompt, model_name or "")
+    prompts, prompt_type, prompt_source = resolve_prompts(config, prompt_type, context_length, model_name or "")
+    # Token counting is deferred until after the run so only the prompts
+    # that were actually sent are tokenized (a sustained run against a
+    # large prompts file may use a small prefix of it).
 
     gpu_monitor = GPUMonitor(config.gpu_poll_interval)
     gpu_monitor.start()
@@ -727,7 +893,7 @@ async def run_sustained_benchmark(
 
     start_time = time.perf_counter()
     results = await _run_sustained_rps(
-        prompt, target_rps, duration_seconds, config, model_name,
+        prompts, target_rps, duration_seconds, config, model_name,
     )
     end_time = time.perf_counter()
     total_time = end_time - start_time
@@ -736,6 +902,11 @@ async def run_sustained_benchmark(
     metrics_stats = metrics_monitor.stop()
 
     effective_users = int(target_rps * (mean([r["duration"] for r in results if r.get("success")]) if results else 1))
+    actual_prompt_tokens = _mean_prompt_tokens(
+        prompts, model_name or "",
+        cache_key=config.prompts_file if prompt_source == "file" else None,
+        n_used=len(results) or 1,
+    )
 
     stats = _compute_stats(
         results, total_time, context_length, max(effective_users, 1),
@@ -743,6 +914,7 @@ async def run_sustained_benchmark(
     )
 
     if stats:
+        stats["prompt_source"] = prompt_source
         stats["mode"] = "sustained_rps"
         stats["target_rps"] = target_rps
         stats["duration_seconds"] = duration_seconds

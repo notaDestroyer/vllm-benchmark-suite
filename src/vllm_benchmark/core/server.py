@@ -48,46 +48,94 @@ class SystemInfo:
                 timeout=2,
             )
             if result.returncode == 0:
-                return result.stdout.strip()
+                # One line per GPU; the driver is host-wide, take the first.
+                lines = [ln.strip() for ln in result.stdout.splitlines() if ln.strip()]
+                return lines[0] if lines else None
         except Exception:
             pass
         return None
+
+    @staticmethod
+    def _query_gpu_lines(field: str, *, nounits: bool = False) -> list[str]:
+        """Run ``nvidia-smi --query-gpu=<field>`` and return one line per GPU.
+
+        ``nvidia-smi`` prints one CSV row per installed GPU, so a multi-GPU
+        host yields several newline-separated lines.  Callers must never
+        treat the raw stdout as a single scalar (see GitHub issue #2).
+        Blank lines are dropped; the list is empty when the tool is
+        unavailable or fails.
+        """
+        fmt = "csv,noheader,nounits" if nounits else "csv,noheader"
+        try:
+            result = subprocess.run(
+                ["nvidia-smi", f"--query-gpu={field}", f"--format={fmt}"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            if result.returncode != 0:
+                return []
+            return [line.strip() for line in result.stdout.splitlines() if line.strip()]
+        except Exception:
+            return []
+
+    @staticmethod
+    def parse_gpu_names(lines: list[str]) -> Optional[str]:
+        """Collapse per-GPU name lines into a single display string.
+
+        Identical names are collapsed to ``"<N>x <name>"``; a heterogeneous
+        mix is joined with ``" + "``.  Returns ``None`` for empty input.
+        """
+        names = [ln.strip() for ln in lines if ln and ln.strip()]
+        if not names:
+            return None
+        if len(names) == 1:
+            return names[0]
+        unique: list[str] = []
+        for name in names:
+            if name not in unique:
+                unique.append(name)
+        if len(unique) == 1:
+            return f"{len(names)}x {unique[0]}"
+        return " + ".join(f"{names.count(n)}x {n}" if names.count(n) > 1 else n for n in unique)
+
+    @staticmethod
+    def parse_total_vram_mb(lines: list[str]) -> Optional[float]:
+        """Sum per-GPU ``memory.total`` lines (MiB) across all GPUs.
+
+        Lines that fail to parse (e.g. ``"[N/A]"``) are skipped.  Returns
+        ``None`` when no line could be parsed.
+        """
+        total = 0.0
+        parsed = False
+        for ln in lines:
+            token = ln.strip().split()[0] if ln and ln.strip() else ""
+            try:
+                total += float(token)
+                parsed = True
+            except ValueError:
+                continue
+        return total if parsed else None
+
+    @staticmethod
+    def get_gpu_count() -> int:
+        """Number of GPUs reported by nvidia-smi (0 when unavailable)."""
+        return len(SystemInfo._query_gpu_lines("name"))
 
     @staticmethod
     def get_gpu_name() -> Optional[str]:
-        """Get GPU model name."""
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            if result.returncode == 0:
-                return result.stdout.strip()
-        except Exception:
-            pass
-        return None
+        """Get GPU model name (collapsed across GPUs, e.g. ``"4x NVIDIA H100"``)."""
+        return SystemInfo.parse_gpu_names(SystemInfo._query_gpu_lines("name"))
 
     @staticmethod
     def get_total_vram() -> Optional[float]:
-        """Get total GPU VRAM in GB."""
-        try:
-            result = subprocess.run(
-                [
-                    "nvidia-smi",
-                    "--query-gpu=memory.total",
-                    "--format=csv,noheader,nounits",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=2,
-            )
-            if result.returncode == 0:
-                return float(result.stdout.strip()) / 1024  # Convert MB to GB
-        except Exception:
-            pass
-        return None
+        """Get total GPU VRAM in GB, summed across all GPUs."""
+        total_mb = SystemInfo.parse_total_vram_mb(
+            SystemInfo._query_gpu_lines("memory.total", nounits=True)
+        )
+        if total_mb is None:
+            return None
+        return total_mb / 1024  # Convert MiB to GB
 
     @staticmethod
     def get_system_info() -> Dict:
@@ -99,6 +147,7 @@ class SystemInfo:
             "cuda_version": SystemInfo.get_cuda_version(),
             "driver_version": SystemInfo.get_driver_version(),
             "gpu_name": SystemInfo.get_gpu_name(),
+            "gpu_count": SystemInfo.get_gpu_count(),
             "total_vram_gb": SystemInfo.get_total_vram(),
             "timestamp": datetime.now().isoformat(),
         }

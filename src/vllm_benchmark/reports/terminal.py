@@ -15,6 +15,8 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from vllm_benchmark.reports.formatting import na
+
 console = Console()
 
 
@@ -124,16 +126,6 @@ def print_summary_table(all_results: List[Dict]) -> None:
 # PR5 analysis panels — model intel / bottleneck / fitness
 # ------------------------------------------------------------------
 
-def _na(value: object, suffix: str = "", fmt: str = "{}") -> str:
-    """Format a value with a suffix, or ``"N/A"`` when missing."""
-    if value is None:
-        return "N/A"
-    try:
-        return f"{fmt.format(value)}{suffix}"
-    except (ValueError, TypeError):
-        return "N/A"
-
-
 def render_model_intel_panel(model_profile: Optional[Dict]) -> Panel:
     """Render the model-intelligence panel (architecture + roofline facts).
 
@@ -151,7 +143,7 @@ def render_model_intel_panel(model_profile: Optional[Dict]) -> Panel:
     arch = "MoE" if p.get("is_moe") else "dense" if p.get("is_moe") is not None else "N/A"
 
     def _params(n: object) -> str:
-        return _na(n / 1e9 if isinstance(n, (int, float)) else None, "B", "{:.1f}")
+        return na(n / 1e9 if isinstance(n, (int, float)) else None, "B", "{:.1f}")
 
     table.add_row("Model", str(p.get("name") or "N/A"))
     table.add_row("Family", str(p.get("family") or "N/A"))
@@ -159,10 +151,10 @@ def render_model_intel_panel(model_profile: Optional[Dict]) -> Panel:
     table.add_row("Active params", _params(p.get("active_params")))
     table.add_row("Total params", _params(p.get("total_params")))
     table.add_row("Attention", str(p.get("attention_type") or "N/A"))
-    table.add_row("Layers", _na(p.get("num_layers")))
+    table.add_row("Layers", na(p.get("num_layers")))
     if p.get("is_moe"):
-        table.add_row("Experts", f"{_na(p.get('experts_per_tok'))}/{_na(p.get('num_experts'))}")
-    table.add_row("KV bytes/token", _na(p.get("kv_bytes_per_token")))
+        table.add_row("Experts", f"{na(p.get('experts_per_tok'))}/{na(p.get('num_experts'))}")
+    table.add_row("KV bytes/token", na(p.get("kv_bytes_per_token")))
     table.add_row("Provenance", f"{p.get('source', 'N/A')} ({p.get('confidence', 'N/A')})")
 
     return Panel(table, title="[bold]Model Intelligence[/bold]", border_style="cyan")
@@ -201,10 +193,10 @@ def render_bottleneck_panel(bottlenecks: Optional[List[Dict]]) -> Panel:
         users = cell[1] if len(cell) > 1 else None
         ctx_label = f"{ctx // 1000}K" if isinstance(ctx, int) and ctx >= 1000 else str(ctx)
         table.add_row(
-            f"{ctx_label}/{_na(users)}",
+            f"{ctx_label}/{na(users)}",
             str(v.get("primary") or "unknown"),
-            _na(v.get("mbu"), "", "{:.0%}"),
-            _na(v.get("mfu"), "", "{:.0%}"),
+            na(v.get("mbu"), "", "{:.0%}"),
+            na(v.get("mfu"), "", "{:.0%}"),
             str(v.get("confidence") or "?"),
         )
 

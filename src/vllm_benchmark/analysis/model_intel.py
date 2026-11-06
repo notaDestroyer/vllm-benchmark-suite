@@ -40,6 +40,7 @@ from functools import lru_cache
 from typing import Any, Literal, Optional
 
 from vllm_benchmark.core.backends.base import ServerInfo
+from vllm_benchmark.core.hardware.gpu_names import match_gpu_key
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -168,42 +169,20 @@ def load_gpu_specs() -> dict:
 def match_gpu_spec(gpu_name: Optional[str]) -> Optional[dict]:
     """Fuzzy-match a detected GPU name to a spec entry.
 
+    Delegates to :func:`vllm_benchmark.core.hardware.gpu_names.match_gpu_key`
+    so the roofline table, the scoring baselines and the pricing table all
+    resolve a name the same way.
+
     Args:
-        gpu_name: Raw GPU name, e.g. ``"NVIDIA H100 80GB HBM3"``.
+        gpu_name: Raw GPU name, e.g. ``"NVIDIA H100 80GB HBM3"`` or
+            ``"2x NVIDIA A100-SXM4-80GB"``.
 
     Returns:
         The matching spec dict (with an added ``"_matched_key"``), or
         ``None`` when no entry matches.
     """
-    if not gpu_name:
-        return None
     specs = load_gpu_specs()
-    cleaned = gpu_name.lower().replace("nvidia ", "")
-    # Normalize separators so "A100-SXM4-80GB" and "A100 80GB" tokenize alike.
-    norm = re.sub(r"[-_/]", " ", cleaned)
-    detected_tokens = set(norm.split())
-
-    best_key: Optional[str] = None
-    best_score = 0.0
-    for key in specs:
-        key_norm = re.sub(r"[-_/]", " ", key.lower())
-        key_tokens = [t for t in key_norm.split() if t]
-        if not key_tokens:
-            continue
-        # Whole-key substring match is the strongest signal.
-        if key_norm in norm:
-            score = 100 + len(key_norm)
-        else:
-            matched = sum(1 for t in key_tokens if t in detected_tokens)
-            if matched == 0:
-                continue
-            # Require the model token (first) to be present.
-            if key_tokens[0] not in detected_tokens:
-                continue
-            score = matched
-        if score > best_score:
-            best_score = score
-            best_key = key
+    best_key = match_gpu_key(gpu_name, specs.keys())
     if best_key is None:
         return None
     spec = dict(specs[best_key])
@@ -357,6 +336,37 @@ def kv_bytes_per_token(
     return int(2 * num_layers * num_kv_heads * head_dim * bpp)
 
 
+def mla_kv_bytes_per_token(
+    num_layers: Optional[int],
+    kv_latent_dim: Optional[int],
+    kv_dtype: Optional[str],
+) -> Optional[int]:
+    """Bytes of KV cache per token for Multi-head Latent Attention (MLA).
+
+    MLA (DeepSeek-V2/V3) caches a single compressed latent of width
+    ``kv_lora_rank + qk_rope_head_dim`` per layer per token instead of
+    per-head K and V tensors, so the formula is
+    ``layers * kv_latent_dim * bytes(kv_dtype)`` with no factor of 2.
+
+    Returns ``None`` if any structural input is missing.
+    """
+    if not num_layers or not kv_latent_dim:
+        return None
+    return int(num_layers * kv_latent_dim * bytes_per_param(kv_dtype))
+
+
+def mla_latent_dim(config: dict) -> Optional[int]:
+    """Return the MLA KV latent width from a HF config, or ``None``.
+
+    Recognises the DeepSeek-style ``kv_lora_rank`` (+ ``qk_rope_head_dim``)
+    fields.  Non-MLA configs return ``None``.
+    """
+    rank = config.get("kv_lora_rank")
+    if not rank:
+        return None
+    return int(rank) + int(config.get("qk_rope_head_dim") or 0)
+
+
 def compute_active_params(config_or_kb: dict) -> Optional[int]:
     """Estimate the number of *active* parameters per forward token.
 
@@ -468,13 +478,17 @@ def _profile_from_config(name: str, config: dict, server: ServerInfo) -> ModelPr
     head_dim = config.get("head_dim")
     if not head_dim and hidden and n_heads:
         head_dim = hidden // n_heads
+    latent = mla_latent_dim(config)
 
     num_experts = config.get("num_experts") or config.get("num_local_experts")
     experts_per_tok = config.get("experts_per_tok") or config.get("num_experts_per_tok")
     is_moe = bool(num_experts) and bool(experts_per_tok)
 
     kv_dtype = server.kv_cache_dtype or server.dtype
-    kvbpt = kv_bytes_per_token(num_layers, n_kv, head_dim, kv_dtype)
+    if latent:
+        kvbpt = mla_kv_bytes_per_token(num_layers, latent, kv_dtype)
+    else:
+        kvbpt = kv_bytes_per_token(num_layers, n_kv, head_dim, kv_dtype)
 
     profile = ModelProfile(
         name=name,
@@ -524,9 +538,15 @@ def _profile_from_kb(name: str, entry: dict, server: ServerInfo) -> ModelProfile
     n_heads = entry.get("num_attention_heads")
     n_kv = entry.get("num_kv_heads")
     hidden = entry.get("hidden_size")
-    head_dim = hidden // n_heads if hidden and n_heads else None
+    # Prefer the curated head_dim: hidden // heads is wrong for models with a
+    # decoupled head dimension (Gemma-2, Qwen3-MoE) and meaningless for MLA.
+    head_dim = entry.get("head_dim") or (hidden // n_heads if hidden and n_heads else None)
     kv_dtype = server.kv_cache_dtype or server.dtype
-    kvbpt = kv_bytes_per_token(entry.get("num_layers"), n_kv, head_dim, kv_dtype)
+    latent = entry.get("kv_latent_dim")
+    if latent:
+        kvbpt = mla_kv_bytes_per_token(entry.get("num_layers"), latent, kv_dtype)
+    else:
+        kvbpt = kv_bytes_per_token(entry.get("num_layers"), n_kv, head_dim, kv_dtype)
     return ModelProfile(
         name=name,
         family=entry.get("family"),
@@ -566,8 +586,18 @@ def _profile_from_name(name: str, server: ServerInfo) -> ModelProfile:
     )
 
 
-def _finalize_params(profile: ModelProfile, config: Optional[dict], total_size: Optional[int]) -> None:
-    """Fill total/active params + weight bytes and cross-check against KB."""
+def _finalize_params(
+    profile: ModelProfile,
+    config: Optional[dict],
+    total_size: Optional[int],
+    quantization: Optional[str] = None,
+) -> None:
+    """Fill total/active params + weight bytes and cross-check against KB.
+
+    ``quantization`` (the served weight format, e.g. ``"fp8"``/``"awq"``)
+    sets bytes-per-parameter for the derived ``weight_bytes``; ``None``
+    means 16-bit weights.
+    """
     # Total params from safetensors index (most authoritative).
     if total_size and profile.total_params is None:
         # safetensors total_size is bytes; convert with the serving dtype.
@@ -611,10 +641,13 @@ def _finalize_params(profile: ModelProfile, config: Optional[dict], total_size: 
     if profile.active_params is None and profile.is_moe is False and profile.total_params:
         profile.active_params = profile.total_params
 
-    # Derive weight_bytes from params when we have a dtype.
+    # Derive weight_bytes from params using the served weight format
+    # (FP8/INT8 -> 1 B, INT4/AWQ/GPTQ -> 0.5 B, else 2 B).
     if profile.weight_bytes is None and profile.total_params:
-        # Use bytes-per-param of serving dtype if available; default 2.
-        profile.weight_bytes = int(profile.total_params * 2)
+        bpp = bytes_per_param(quantization)
+        profile.weight_bytes = int(profile.total_params * bpp)
+        if quantization and bpp != 2.0:
+            profile.notes.append(f"weight_bytes assumes {bpp} B/param for quantization={quantization}.")
 
 
 def build_profile(
@@ -670,7 +703,7 @@ def build_profile(
         profile.notes.append(f"Server reports quantization={server_info.quantization}.")
 
     try:
-        _finalize_params(profile, config, total_size)
+        _finalize_params(profile, config, total_size, quantization=server_info.quantization)
     except Exception:
         # Never let param accounting raise.
         pass

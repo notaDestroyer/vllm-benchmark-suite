@@ -1,7 +1,9 @@
 """Interactive HTML benchmark report with Plotly charts.
 
-Generates a self-contained HTML file that can be shared with teams,
-posted in Slack, or emailed to managers — no dependencies required to view.
+Generates a single-file HTML report that can be shared with teams, posted
+in Slack, or emailed to managers.  All data is embedded in the file; the
+interactive charts load Plotly from its CDN, so a network connection is
+needed for the charts (the tables and analysis sections render offline).
 
 Author: amit
 License: MIT
@@ -9,24 +11,39 @@ License: MIT
 
 from __future__ import annotations
 
+import html as _html
 import json
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
+
+from vllm_benchmark import __version__
+from vllm_benchmark.analysis.bottleneck import top_verdict
+from vllm_benchmark.reports.formatting import na
 
 if TYPE_CHECKING:
     from vllm_benchmark.analysis.diagnostics import Diagnostic
     from vllm_benchmark.analysis.scoring import ScoreBreakdown
 
 
-def _na(value: object, suffix: str = "", fmt: str = "{}") -> str:
-    """Format a value with a suffix, or ``"N/A"`` when missing."""
-    if value is None:
-        return "N/A"
-    try:
-        return f"{fmt.format(value)}{suffix}"
-    except (ValueError, TypeError):
-        return "N/A"
+def _esc(value: object) -> str:
+    """HTML-escape any server/user-derived string before interpolation.
+
+    Model names, bottleneck levers, fitness verdicts, diagnostics text and
+    system fields all originate outside this process (the inference server,
+    nvidia-smi, the HF hub) and must never be injected raw into the page.
+    """
+    return _html.escape("" if value is None else str(value), quote=True)
+
+
+def _script_json(obj: object) -> str:
+    """JSON for an inline ``<script>`` block.
+
+    ``</script>`` (and any ``</``) inside a JSON string would terminate the
+    script element early, so the forward slash is escaped; this is valid
+    JSON and JavaScript.
+    """
+    return json.dumps(obj).replace("</", "<\\/")
 
 
 def _model_intel_section(metadata: dict) -> str:
@@ -37,21 +54,21 @@ def _model_intel_section(metadata: dict) -> str:
     arch = "MoE" if p.get("is_moe") else "dense" if p.get("is_moe") is not None else "N/A"
 
     def _params(n: object) -> str:
-        return _na(n / 1e9 if isinstance(n, (int, float)) else None, "B", "{:.1f}")
+        return na(n / 1e9 if isinstance(n, (int, float)) else None, "B", "{:.1f}")
 
     rows = [
-        ("Model", p.get("name") or "N/A"),
-        ("Family", p.get("family") or "N/A"),
+        ("Model", _esc(p.get("name") or "N/A")),
+        ("Family", _esc(p.get("family") or "N/A")),
         ("Architecture", arch),
         ("Active params", _params(p.get("active_params"))),
         ("Total params", _params(p.get("total_params"))),
-        ("Attention", p.get("attention_type") or "N/A"),
-        ("Layers", _na(p.get("num_layers"))),
-        ("KV bytes/token", _na(p.get("kv_bytes_per_token"))),
-        ("Provenance", f"{p.get('source', 'N/A')} ({p.get('confidence', 'N/A')})"),
+        ("Attention", _esc(p.get("attention_type") or "N/A")),
+        ("Layers", na(p.get("num_layers"))),
+        ("KV bytes/token", na(p.get("kv_bytes_per_token"))),
+        ("Provenance", _esc(f"{p.get('source', 'N/A')} ({p.get('confidence', 'N/A')})")),
     ]
     if p.get("is_moe"):
-        rows.insert(7, ("Experts", f"{_na(p.get('experts_per_tok'))}/{_na(p.get('num_experts'))}"))
+        rows.insert(7, ("Experts", f"{na(p.get('experts_per_tok'))}/{na(p.get('num_experts'))}"))
     body = "".join(f"<tr><td><strong>{k}</strong></td><td>{v}</td></tr>" for k, v in rows)
     return f'<h2>Model Intelligence</h2>\n<div class="card"><table>{body}</table></div>\n'
 
@@ -61,8 +78,7 @@ def _bottleneck_section(metadata: dict) -> str:
     verdicts = metadata.get("bottlenecks") or []
     if not verdicts:
         return ""
-    order = {"high": 0, "medium": 1, "low": 2}
-    top = min(verdicts, key=lambda v: order.get(v.get("confidence"), 3))
+    top = top_verdict(verdicts) or {}
 
     rows = ""
     for v in verdicts:
@@ -71,17 +87,17 @@ def _bottleneck_section(metadata: dict) -> str:
         users = cell[1] if len(cell) > 1 else None
         ctx_label = f"{ctx // 1000}K" if isinstance(ctx, int) and ctx >= 1000 else str(ctx)
         rows += (
-            f"<tr><td>{ctx_label}/{_na(users)}</td>"
-            f"<td>{v.get('primary') or 'unknown'}</td>"
-            f"<td>{_na(v.get('mbu'), '', '{:.0%}')}</td>"
-            f"<td>{_na(v.get('mfu'), '', '{:.0%}')}</td>"
-            f"<td>{v.get('confidence') or '?'}</td></tr>"
+            f"<tr><td>{_esc(ctx_label)}/{na(users)}</td>"
+            f"<td>{_esc(v.get('primary') or 'unknown')}</td>"
+            f"<td>{na(v.get('mbu'), '', '{:.0%}')}</td>"
+            f"<td>{na(v.get('mfu'), '', '{:.0%}')}</td>"
+            f"<td>{_esc(v.get('confidence') or '?')}</td></tr>"
         )
     return (
         "<h2>Bottleneck Analysis</h2>\n"
-        f'<div class="card"><p><strong>Governing:</strong> {top.get("primary", "unknown")} '
-        f'(confidence {top.get("confidence", "?")})<br>'
-        f'<strong>Lever:</strong> {top.get("lever") or "N/A"}</p>'
+        f'<div class="card"><p><strong>Governing:</strong> {_esc(top.get("primary", "unknown"))} '
+        f'(confidence {_esc(top.get("confidence", "?"))})<br>'
+        f'<strong>Lever:</strong> {_esc(top.get("lever") or "N/A")}</p>'
         "<table><thead><tr><th>Cell</th><th>Primary</th><th>MBU</th>"
         "<th>MFU</th><th>Conf</th></tr></thead>"
         f"<tbody>{rows}</tbody></table></div>\n"
@@ -96,8 +112,8 @@ def _fitness_section(metadata: dict) -> str:
     if not fitness:
         return ""
     rows = "".join(
-        f"<tr><td>{name}</td><td>{g.get('grade', 'N/A')}</td>"
-        f"<td>{g.get('limiting_factor') or ''}</td></tr>"
+        f"<tr><td>{_esc(name)}</td><td>{_esc(g.get('grade', 'N/A'))}</td>"
+        f"<td>{_esc(g.get('limiting_factor') or '')}</td></tr>"
         for name, g in profiles.items()
     )
     table = (
@@ -107,7 +123,7 @@ def _fitness_section(metadata: dict) -> str:
     )
     return (
         "<h2>Application Fitness</h2>\n"
-        f'<div class="card"><p><strong>Verdict:</strong> {fitness.get("verdict") or "N/A"}</p>'
+        f'<div class="card"><p><strong>Verdict:</strong> {_esc(fitness.get("verdict") or "N/A")}</p>'
         f"{table}</div>\n"
     )
 
@@ -141,7 +157,7 @@ def generate_html_report(
     diagnostics: list[Diagnostic] | None = None,
     output_path: str = "./outputs",
 ) -> str:
-    """Generate self-contained HTML benchmark report.
+    """Generate the single-file HTML benchmark report.
 
     Returns:
         Path to the generated HTML file.
@@ -154,7 +170,8 @@ def generate_html_report(
     safe_name = model_name.replace("/", "_").replace("\\", "_")[:60]
     filename = output_dir / f"benchmark_{safe_name}_{timestamp}.html"
 
-    results_json = json.dumps(results)
+    results_json = _script_json(results)
+    model_name_html = _esc(model_name)
     system_info = metadata.get("system_info", {})
     server_info = metadata.get("server_info", {})
 
@@ -179,8 +196,8 @@ def generate_html_report(
             cards.append(
                 f'<div style="border-left:4px solid {border};background:{bg};padding:12px 16px;'
                 f'margin:8px 0;border-radius:0 6px 6px 0">'
-                f'<strong style="color:{border}">[{label}] {d.title}</strong>'
-                f'<p style="margin:4px 0 0;color:#333">{d.message}</p></div>'
+                f'<strong style="color:{border}">[{label}] {_esc(d.title)}</strong>'
+                f'<p style="margin:4px 0 0;color:#333">{_esc(d.message)}</p></div>'
             )
         diag_html = "\n".join(cards)
     else:
@@ -196,7 +213,7 @@ def generate_html_report(
                      border-radius:12px;margin:16px 0">
             <div style="font-size:14px;color:#aaa;text-transform:uppercase;letter-spacing:2px">vLLM Benchmark Score</div>
             <div style="font-size:64px;font-weight:bold;color:{gc};margin:8px 0">{score.overall:,}</div>
-            <div style="font-size:28px;color:{gc};margin-bottom:12px">Grade: {score.grade}</div>
+            <div style="font-size:28px;color:{gc};margin-bottom:12px">Grade: {_esc(score.grade)}</div>
             <div style="display:flex;justify-content:center;gap:24px;flex-wrap:wrap">
                 <div style="color:#ddd"><small>Throughput</small><br><b>{score.throughput:,}</b></div>
                 <div style="color:#ddd"><small>Latency</small><br><b>{score.latency:,}</b></div>
@@ -217,7 +234,7 @@ def generate_html_report(
         if val:
             if key == "total_vram_gb":
                 val = f"{val:.0f} GB"
-            sys_rows += f"<tr><td><strong>{label}</strong></td><td>{val}</td></tr>"
+            sys_rows += f"<tr><td><strong>{label}</strong></td><td>{_esc(val)}</td></tr>"
 
     for key, label in [
         ("model_name", "Model"), ("version", "vLLM Version"),
@@ -227,14 +244,14 @@ def generate_html_report(
         if val:
             if key == "max_model_len":
                 val = f"{val:,} tokens"
-            sys_rows += f"<tr><td><strong>{label}</strong></td><td>{val}</td></tr>"
+            sys_rows += f"<tr><td><strong>{label}</strong></td><td>{_esc(val)}</td></tr>"
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>vLLM Benchmark Report — {model_name}</title>
+<title>vLLM Benchmark Report — {model_name_html}</title>
 <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <style>
   *{{margin:0;padding:0;box-sizing:border-box}}
@@ -254,7 +271,7 @@ def generate_html_report(
 </head>
 <body>
 <h1>vLLM Benchmark Report</h1>
-<p class="subtitle">{model_name} &mdash; {datetime.now().strftime("%Y-%m-%d %H:%M")}</p>
+<p class="subtitle">{model_name_html} &mdash; {datetime.now().strftime("%Y-%m-%d %H:%M")}</p>
 
 {score_html}
 
@@ -293,7 +310,7 @@ def generate_html_report(
         ctx_k = r.get("context_length", 0) / 1000
         html += (
             f"<tr><td>{ctx_k:.0f}K</td>"
-            f"<td>{r.get('concurrent_users', '?')}</td>"
+            f"<td>{_esc(r.get('concurrent_users', '?'))}</td>"
             f"<td>{r.get('tokens_per_second', 0):.1f}</td>"
             f"<td>{r.get('avg_latency', 0):.2f}</td>"
             f"<td>{r.get('ttft_estimate', 0) * 1000:.0f}</td>"
@@ -305,7 +322,7 @@ def generate_html_report(
     html += f"""</tbody></table></div>
 
 <div class="footer">
-  Generated by vLLM Benchmark Suite v3.0.0 &mdash; {datetime.now().isoformat()}
+  Generated by vLLM Benchmark Suite v{__version__} &mdash; {datetime.now().isoformat()}
 </div>
 
 <script>

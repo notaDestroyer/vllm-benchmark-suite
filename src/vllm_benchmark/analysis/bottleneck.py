@@ -30,7 +30,7 @@ License: MIT
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal, Optional
+from typing import Any, Literal, Optional
 
 from vllm_benchmark.analysis.model_intel import (
     ModelProfile,
@@ -437,10 +437,37 @@ def classify_cell(
 # Whole-run classification
 # ---------------------------------------------------------------------------
 
+_CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+def top_verdict(verdicts: Optional[list[dict]]) -> Optional[dict]:
+    """Pick the governing verdict to headline a run.
+
+    Prefers the highest confidence; among equal confidence the cell with
+    the highest concurrency wins (the most loaded point is the one whose
+    bottleneck actually limits the deployment).  Accepts
+    :meth:`BottleneckVerdict.to_dict` dicts; returns ``None`` for empty
+    input.  This is the single implementation used by the result card,
+    share markdown, HTML report and analyst bundle.
+    """
+    if not verdicts:
+        return None
+
+    def _rank(v: dict) -> tuple:
+        cell = v.get("cell") or ()
+        conc = cell[1] if len(cell) > 1 and isinstance(cell[1], (int, float)) else 0
+        return (_CONFIDENCE_ORDER.get(v.get("confidence"), 3), -conc)
+
+    return min(verdicts, key=_rank)
+
+
 def classify_run(
     results: list[dict],
     profile: Optional[ModelProfile],
     gpu_spec: Optional[dict],
+    *,
+    server_info: Optional[Any] = None,
+    tensor_parallel: Optional[int] = None,
 ) -> list[BottleneckVerdict]:
     """Classify every cell in a run, deriving per-group batch scaling.
 
@@ -449,14 +476,29 @@ def classify_run(
     regime (:func:`batch_scaling_regime`) which is fed to
     :func:`classify_cell` so it can flag interconnect / agreement.
 
+    Server-side signals (``gpu_cache_usage_perc``, ``num_requests_waiting``,
+    ``preemptions``) are read from each cell, where the engine's
+    :class:`~vllm_benchmark.core.metrics.MetricsMonitor` attaches them.
+    ``tensor_parallel`` is read from the cell when present, else from the
+    explicit ``tensor_parallel`` argument, else from
+    ``server_info.tensor_parallel`` (a :class:`ServerInfo` or dict).
+
     Args:
         results: All per-cell result dicts from a benchmark run.
         profile: The model profile.
         gpu_spec: The GPU spec dict.
+        server_info: Optional server description used for the
+            tensor-parallel fallback.
+        tensor_parallel: Optional explicit tensor-parallel degree.
 
     Returns:
         One :class:`BottleneckVerdict` per input cell, in input order.
     """
+    if tensor_parallel is None and server_info is not None:
+        if isinstance(server_info, dict):
+            tensor_parallel = server_info.get("tensor_parallel")
+        else:
+            tensor_parallel = getattr(server_info, "tensor_parallel", None)
     # Build batch-scaling regime per (context, prompt_type).
     groups: dict[tuple, list[dict]] = {}
     for r in results:
@@ -477,6 +519,8 @@ def classify_run(
             for k in ("gpu_cache_usage_perc", "num_requests_waiting", "preemptions", "tensor_parallel")
             if r.get(k) is not None
         }
+        if server_metrics.get("tensor_parallel") is None and tensor_parallel is not None:
+            server_metrics["tensor_parallel"] = tensor_parallel
         verdicts.append(
             classify_cell(
                 r, profile, gpu_spec, server_metrics or None,

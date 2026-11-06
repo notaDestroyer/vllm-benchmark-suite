@@ -210,6 +210,11 @@ Examples:
     analysis = parser.add_argument_group("Analysis")
     analysis.add_argument("--bottleneck-sweep", action="store_true",
                           help="Run prefill/decode roofline probes to find the empirical critical batch")
+    analysis.add_argument("--detailed-summary", action="store_true",
+                          help="Print the full per-cell performance summary tables after the run")
+    analysis.add_argument("--leaderboard", nargs="?", const="./outputs", default=None, metavar="DIR",
+                          help="Standalone: build LEADERBOARD.md from result_*.json files in DIR "
+                               "(default: ./outputs) and exit")
 
     report = parser.add_argument_group("AI analyst report")
     report.add_argument("--ai-report", action="store_true",
@@ -420,6 +425,68 @@ def _run_compare_quants(paths: list[str], output_dir: str) -> None:
     console.print(f"[green]JSON:[/green]  {json_path}")
 
 
+def _billable_gpus(server_info, system_info: dict) -> int:
+    """GPUs to charge for: server TP x PP when known, else host GPU count, else 1."""
+    tp = getattr(server_info, "tensor_parallel", None)
+    pp = getattr(server_info, "pipeline_parallel", None)
+    if tp or pp:
+        return max(1, int(tp or 1)) * max(1, int(pp or 1))
+    try:
+        return max(1, int(system_info.get("gpu_count") or 1))
+    except (TypeError, ValueError):
+        return 1
+
+
+def _run_leaderboard(results_dir: str) -> str:
+    """Render the community leaderboard from ``result_*.json`` files.
+
+    Prints the Markdown table and writes it to ``<results_dir>/LEADERBOARD.md``.
+    Returns the path written.
+    """
+    from pathlib import Path
+
+    from vllm_benchmark.analysis.publish import generate_leaderboard_md
+
+    md = generate_leaderboard_md(results_dir)
+    console.print(md)
+    out = Path(results_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / "LEADERBOARD.md"
+    path.write_text(md, encoding="utf-8")
+    console.print(f"[green]Leaderboard:[/green] {path}")
+    return str(path)
+
+
+def _write_analysis_charts(
+    results: list[dict],
+    model_profile: dict | None,
+    gpu_spec: dict | None,
+    bottlenecks: list[dict],
+    output_dir: str,
+    timestamp: str,
+) -> list[str]:
+    """Render the roofline and bottleneck-map PNGs next to the main chart.
+
+    Each chart is skipped (never fatal) when its inputs are absent or the
+    renderer raises.  Returns the list of paths written.
+    """
+    from vllm_benchmark.reports.charts import ensure_output_directory, plot_bottleneck_map, plot_roofline
+
+    out = ensure_output_directory(output_dir)
+    written: list[str] = []
+    if model_profile or gpu_spec:
+        try:
+            written.append(plot_roofline(results, model_profile, gpu_spec, str(out / f"roofline_{timestamp}.png")))
+        except Exception as exc:  # charts must never break the run
+            console.print(f"  [yellow]Roofline chart skipped:[/yellow] {exc}")
+    if bottlenecks:
+        try:
+            written.append(plot_bottleneck_map(bottlenecks, str(out / f"bottleneck_map_{timestamp}.png")))
+        except Exception as exc:
+            console.print(f"  [yellow]Bottleneck map skipped:[/yellow] {exc}")
+    return written
+
+
 # ------------------------------------------------------------------
 # Head-to-head A/B (thin orchestration over the tested core)
 # ------------------------------------------------------------------
@@ -491,6 +558,11 @@ def main():
         _run_compare_quants(args.compare_quants, args.output_dir)
         sys.exit(0)
 
+    # ---- Standalone leaderboard (no server run needed) ----
+    if args.leaderboard is not None:
+        _run_leaderboard(args.leaderboard)
+        sys.exit(0)
+
     # Build config
     config = BenchmarkConfig(api_url=args.url, output_dir=args.output_dir, streaming=not args.no_streaming)
 
@@ -533,7 +605,23 @@ def main():
     config.generate_html = not args.no_html
     config.generate_charts = not args.no_charts
     if args.prompts_file:
+        # Validate up front so a bad file fails before the server is touched,
+        # and collapse the prompt-type axis: every cell uses the file.
+        from vllm_benchmark.core.async_engine import CUSTOM_PROMPT_TYPE, prime_custom_prompts
+        from vllm_benchmark.core.prompts import load_custom_prompts
+        try:
+            custom_prompts = load_custom_prompts(args.prompts_file)
+        except Exception as exc:
+            console.print(f"[red]Cannot load --prompts-file {args.prompts_file}: {exc}[/red]")
+            sys.exit(2)
+        if not custom_prompts:
+            console.print(f"[red]--prompts-file {args.prompts_file} contains no prompts[/red]")
+            sys.exit(2)
         config.prompts_file = args.prompts_file
+        prime_custom_prompts(args.prompts_file, custom_prompts)  # parsed once, reused by the engine
+        config.prompt_types = [CUSTOM_PROMPT_TYPE]
+        if args.prompt_type:
+            console.print("[yellow]--prompt-type is ignored when --prompts-file is given[/yellow]")
 
     # Seed for reproducibility
     if args.seed is not None:
@@ -582,13 +670,13 @@ def main():
     # ---- Auto-detect GPU cost ----
     cost_per_hour = args.cost  # explicit CLI override takes priority
     if cost_per_hour is None:
-        gpu_name = system_info.get("gpu_name", "")
-        if gpu_name:
-            gpu_lower = gpu_name.lower()
-            for pricing_key, price in GPU_PRICING.items():
-                if pricing_key.lower() in gpu_lower or gpu_lower in pricing_key.lower():
-                    cost_per_hour = price
-                    break
+        from vllm_benchmark.core.hardware.gpu_names import match_gpu_key
+        pricing_key = match_gpu_key(system_info.get("gpu_name"), GPU_PRICING.keys())
+        if pricing_key is not None:
+            # Pricing is per GPU.  Bill the GPUs the *server* occupies
+            # (tensor x pipeline parallel) when it reports them; only fall
+            # back to the whole host when the parallelism is unknown.
+            cost_per_hour = GPU_PRICING[pricing_key] * _billable_gpus(backend_server_info, system_info)
 
     # Display system panel
     sys_table = Table(show_header=False, box=box.ROUNDED, border_style="green")
@@ -614,7 +702,10 @@ def main():
     console.print(f"\n[bold]Test plan:[/bold] {config.total_tests} configs x {iterations} iterations = {total_runs} runs")
     console.print(f"  Context:     {', '.join(f'{c // 1000}K' for c in config.context_lengths)}")
     console.print(f"  Concurrency: {', '.join(str(u) for u in config.concurrency_levels)}")
-    console.print(f"  Prompts:     {', '.join(config.prompt_types)}")
+    if config.prompts_file:
+        console.print(f"  Prompts:     custom ({config.prompts_file}); context lengths label the matrix only")
+    else:
+        console.print(f"  Prompts:     {', '.join(config.prompt_types)}")
     console.print(f"  Output:      {config.output_tokens} tokens")
     if config.streaming:
         console.print("  TTFT:        [green]Streaming (true measurement)[/green]")
@@ -627,6 +718,14 @@ def main():
     if args.traffic:
         from vllm_benchmark.core.prompts import generate_prompt
         from vllm_benchmark.core.traffic import TrafficConfig, format_traffic_report, run_multiturn_traffic, run_poisson_traffic
+
+        # Honour --prompts-file here too: the simulator takes any
+        # (target_tokens, model_name) -> str callable.
+        if config.prompts_file:
+            from vllm_benchmark.core.async_engine import custom_prompt_generator
+            prompt_generator = custom_prompt_generator(config)
+        else:
+            prompt_generator = generate_prompt
 
         traffic_config = TrafficConfig(
             target_rps=args.target_rps,
@@ -645,11 +744,11 @@ def main():
 
         if args.traffic == "multiturn":
             traffic_result = run_multiturn_traffic(
-                traffic_config, model_name, config.api_endpoint, generate_prompt, config.request_timeout,
+                traffic_config, model_name, config.api_endpoint, prompt_generator, config.request_timeout,
             )
         else:
             traffic_result = run_poisson_traffic(
-                traffic_config, model_name, config.api_endpoint, generate_prompt, config.request_timeout,
+                traffic_config, model_name, config.api_endpoint, prompt_generator, config.request_timeout,
             )
 
         report = format_traffic_report(traffic_result, traffic_config)
@@ -794,6 +893,11 @@ def main():
                         "avg_mem_clock": mean([s["mem_clock"] for s in test_gpu]),
                     })
                 result["iteration"] = iteration
+                # Parallelism is a server property; carry it on every cell so
+                # the bottleneck classifier (and any offline re-analysis of the
+                # JSON) can detect interconnect-bound scaling.
+                if backend_server_info.tensor_parallel is not None:
+                    result.setdefault("tensor_parallel", backend_server_info.tensor_parallel)
                 all_results.append(result)
 
                 iter_tag = f" (iter {iteration + 1})" if iterations > 1 else ""
@@ -848,6 +952,7 @@ def main():
     model_profile_dict = None
     bottleneck_dicts: list[dict] = []
     advisory_dict = None
+    gpu_spec = None
     try:
         from vllm_benchmark.analysis.advisor import build_advisory
         from vllm_benchmark.analysis.bottleneck import classify_run
@@ -863,7 +968,7 @@ def main():
         gpu_spec = match_gpu_spec(system_info.get("gpu_name"))
         model_profile_dict = profile.to_dict()
 
-        verdicts = classify_run(reporting_results, profile, gpu_spec)
+        verdicts = classify_run(reporting_results, profile, gpu_spec, server_info=backend_server_info)
         bottleneck_dicts = [v.to_dict() for v in verdicts]
 
         # Single-user roofline summary for the advisory explanation.
@@ -972,7 +1077,11 @@ def main():
     with open(json_file, "w") as f:
         json.dump(results_package, f, indent=2)
 
-    df = pd.DataFrame(all_results)
+    # Raw sample lists / nested stats live in the JSON; keep the CSV scalar.
+    df = pd.DataFrame([
+        {k: v for k, v in r.items() if not isinstance(v, (list, dict, tuple))}
+        for r in all_results
+    ])
     csv_file = output_path / f"benchmark_{safe_model}_{timestamp}.csv"
     df.to_csv(csv_file, index=False)
 
@@ -1055,6 +1164,13 @@ def main():
         summary_table.add_row("Cost / 1M tokens", f"${best_cost:.4f}", "Best configuration")
     console.print(summary_table)
 
+    if args.detailed_summary:
+        from vllm_benchmark.reports.terminal import print_summary_table
+        try:
+            print_summary_table(reporting_results)
+        except Exception as exc:  # presentation only, never fatal
+            console.print(f"[yellow]Detailed summary skipped:[/yellow] {exc}")
+
     # ---- Analysis panels (model intel / bottleneck / fitness) ----
     from vllm_benchmark.reports.terminal import (
         render_bottleneck_panel,
@@ -1074,6 +1190,10 @@ def main():
         from vllm_benchmark.reports.charts import visualize_results
         viz_file = visualize_results(reporting_results, model_name, system_info, server_info, config.output_tokens, config.output_dir)
         console.print(f"  [green]Charts:[/green] {viz_file}")
+        for extra in _write_analysis_charts(
+            reporting_results, model_profile_dict, gpu_spec, bottleneck_dicts, config.output_dir, timestamp,
+        ):
+            console.print(f"  [green]Chart:[/green]  {extra}")
 
     # ---- HTML report ----
     if config.generate_html:
