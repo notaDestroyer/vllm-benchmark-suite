@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## v4.2.0 - Know Your GPU (2026-11-06)
+
+The suite now learns the GPU from the GPU: roofline peaks are derived from the
+device via NVML instead of trusted from a table, and a new Capacity & Ceilings
+analysis answers "does it fit, how far can I push it, how close to the limit
+did I get, what would a different quant buy, and is the card power-limited"
+with numbers whose formulas and references are recorded in the output.
 
 ### Added
 - **Capacity & Ceilings analysis** (`advisory.capacity`, terminal panel, HTML
