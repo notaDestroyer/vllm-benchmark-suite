@@ -812,6 +812,11 @@ def main():
                         "avg_mem_clock": mean([s["mem_clock"] for s in test_gpu]),
                     })
                 result["iteration"] = iteration
+                # Parallelism is a server property; carry it on every cell so
+                # the bottleneck classifier (and any offline re-analysis of the
+                # JSON) can detect interconnect-bound scaling.
+                if backend_server_info.tensor_parallel is not None:
+                    result.setdefault("tensor_parallel", backend_server_info.tensor_parallel)
                 all_results.append(result)
 
                 iter_tag = f" (iter {iteration + 1})" if iterations > 1 else ""
@@ -881,7 +886,7 @@ def main():
         gpu_spec = match_gpu_spec(system_info.get("gpu_name"))
         model_profile_dict = profile.to_dict()
 
-        verdicts = classify_run(reporting_results, profile, gpu_spec)
+        verdicts = classify_run(reporting_results, profile, gpu_spec, server_info=backend_server_info)
         bottleneck_dicts = [v.to_dict() for v in verdicts]
 
         # Single-user roofline summary for the advisory explanation.
