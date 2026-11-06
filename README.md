@@ -102,7 +102,7 @@ Everything also lands in `./outputs/`: `benchmark_*.json` (all numbers, plus `mo
 
 ---
 
-## Things r/LocalLLaMA actually asks
+## Things that matter
 
 ### "Is AWQ or GPTQ or FP8 faster on my card?"
 
