@@ -30,13 +30,14 @@ def _load_pyproject() -> dict:
         return tomllib.load(f)
 
 
-def test_version_is_4_0_0():
-    assert vllm_benchmark.__version__ == "4.0.0"
+def test_version_is_a_release_version():
+    # Major 4 line; the exact value is asserted against pyproject below.
+    assert vllm_benchmark.__version__.startswith("4.")
 
 
 def test_pyproject_version_matches_dunder():
     data = _load_pyproject()
-    assert data["project"]["version"] == "4.0.0"
+    assert data["project"]["version"] == vllm_benchmark.__version__
 
 
 def test_both_console_scripts_resolve_to_cli_main():

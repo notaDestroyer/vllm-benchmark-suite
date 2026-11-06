@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import threading
 import time
@@ -146,6 +147,9 @@ Examples:
     conn = parser.add_argument_group("Connection")
     conn.add_argument("--url", default="http://localhost:8000", help="vLLM server URL (default: http://localhost:8000)")
     conn.add_argument("--model", default=None, help="Model name override (auto-detected if omitted)")
+    conn.add_argument("--tokenizer", default=None, metavar="ID_OR_PATH",
+                      help="Tokenizer HF repo id or local path for prompt generation / token counting "
+                           "(default: the served model name; env: VLLM_BENCH_TOKENIZER)")
     conn.add_argument("--backend", choices=["auto", "vllm", "sglang"], default="auto",
                       help="Inference backend (default: auto-detect)")
 
@@ -600,6 +604,9 @@ def main():
 
     if args.model:
         config.model_name = args.model
+    tokenizer_override = args.tokenizer or os.environ.get("VLLM_BENCH_TOKENIZER")
+    if tokenizer_override:
+        config.tokenizer = tokenizer_override
     config.backend = args.backend
     config.warmup = not args.no_warmup
     config.generate_html = not args.no_html
@@ -688,6 +695,8 @@ def main():
     if system_info.get("cuda_version"):
         sys_table.add_row("CUDA", system_info["cuda_version"])
     sys_table.add_row("Model", model_name)
+    if config.tokenizer:
+        sys_table.add_row("Tokenizer", config.tokenizer)
     if server_info.get("version"):
         sys_table.add_row("vLLM", server_info["version"])
     if server_info.get("quantization"):
@@ -725,7 +734,8 @@ def main():
             from vllm_benchmark.core.async_engine import custom_prompt_generator
             prompt_generator = custom_prompt_generator(config)
         else:
-            prompt_generator = generate_prompt
+            def prompt_generator(target_tokens: int, _model: str = "") -> str:
+                return generate_prompt(target_tokens, config.tokenizer_id(model_name))
 
         traffic_config = TrafficConfig(
             target_rps=args.target_rps,

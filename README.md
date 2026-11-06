@@ -27,7 +27,7 @@ Point it at your inference server and get a full performance profile in ~5 minut
 - **Roofline bottleneck analysis** — tells you whether each load point is memory-bandwidth, compute, or overhead bound, and what lever to pull.
 - **True async load** — requests run concurrently via `aiohttp`, not threads. No GIL bottleneck.
 - **True TTFT and split throughput** — actual Time-to-First-Token via SSE streaming, and measured prefill vs decode throughput (not a fixed-percentage estimate).
-- **Accurate token counts** — uses `AutoTokenizer` from `transformers`, not `len(text) // 4`.
+- **Accurate token counts** — uses `AutoTokenizer` from `transformers`, not `len(text) // 4`. Pass `--tokenizer` (or set `VLLM_BENCH_TOKENIZER`) when the served model name is not a public HF repo.
 - **Statistical rigor** — BCa confidence intervals, hypothesis tests, effect sizes, and multiple-comparison correction.
 - **Quality measurement** — probe / perplexity / KL-divergence modes, reported separately from performance.
 - **Optional AI analyst report** — an LLM writes the narrative; every number is computed and verified by the tool.
@@ -359,6 +359,8 @@ vllm-bench [OPTIONS]          (also available as: llm-bench)
 Connection:
   --url URL              Server URL (default: http://localhost:8000)
   --model NAME           Model name override (auto-detected)
+  --tokenizer ID|PATH    Tokenizer for prompt generation / token counting
+                         (default: model name; env VLLM_BENCH_TOKENIZER)
   --backend TYPE         auto|vllm|sglang (default: auto)
 
 Presets (mutually exclusive):

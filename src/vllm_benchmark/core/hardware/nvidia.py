@@ -20,6 +20,27 @@ from typing import Dict, Optional
 
 from vllm_benchmark.core.hardware.base import HardwareMonitor
 
+_gpu_monitoring_warned = False
+_warn_lock = threading.Lock()
+
+
+def _warn_gpu_monitoring_once(err: Exception) -> None:
+    """Emit the GPU-monitoring warning at most once per process.
+
+    The poller runs every ``poll_interval`` seconds (0.1 s by default), so
+    on a CPU-only client the same "nvidia-smi not found" line would
+    otherwise be printed hundreds of times per cell.
+    """
+    global _gpu_monitoring_warned
+    with _warn_lock:
+        if _gpu_monitoring_warned:
+            return
+        _gpu_monitoring_warned = True
+    if isinstance(err, FileNotFoundError):
+        print("[WARNING] nvidia-smi not found - GPU monitoring disabled for this run.", file=sys.stderr)
+    else:
+        print(f"[WARNING] GPU monitoring error: {err} (further occurrences suppressed)", file=sys.stderr)
+
 
 class NvidiaMonitor(HardwareMonitor):
     """Real-time NVIDIA GPU performance monitor.
@@ -140,7 +161,7 @@ class NvidiaMonitor(HardwareMonitor):
                     per_gpu.append(parsed)
             return per_gpu
         except Exception as e:
-            print(f"[WARNING] GPU monitoring error: {e}", file=sys.stderr)
+            _warn_gpu_monitoring_once(e)
             return []
 
     def get_gpu_stats(self) -> Optional[Dict]:

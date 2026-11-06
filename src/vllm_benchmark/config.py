@@ -85,6 +85,7 @@ class BenchmarkConfig:
     # Connection
     api_url: str = "http://localhost:8000"
     model_name: Optional[str] = None  # Auto-detected if None
+    tokenizer: Optional[str] = None  # HF repo id or local path; defaults to model_name
     backend: str = "auto"  # Backend selection: auto|vllm|sglang
 
     # Test matrix
@@ -136,6 +137,15 @@ class BenchmarkConfig:
     report_llm_url: Optional[str] = None  # Endpoint URL for local/openai providers
     report_model: Optional[str] = None  # Model name for the report provider
     report_max_tokens: int = 8000  # Max tokens for the report generation
+
+    def tokenizer_id(self, model_name: Optional[str] = None) -> str:
+        """Tokenizer to count/generate prompts with.
+
+        ``--tokenizer`` (or ``VLLM_BENCH_TOKENIZER``) wins; otherwise the
+        served model name is used, which only works when it is a public HF
+        repo id.  Gated or locally-served models need the override.
+        """
+        return self.tokenizer or model_name or self.model_name or ""
 
     @property
     def api_endpoint(self) -> str:

@@ -1,8 +1,18 @@
 # Changelog
 
-## Unreleased
+## v4.1.0 - Correctness & Review Fixes (2026-11-06)
+
+First release since v3.1.1 on PyPI: v4.0.0 was tagged in the changelog but never
+tagged in git or published, so this release carries the whole v4.0.0 feature set
+below plus the fixes in this section.
 
 ### Fixed
+- **Ported from PR #4 (thanks @tattrongvu)** — `save_result` no longer crashes when
+  the GPU or model is reported as `None` (CPU-only clients); the nvidia-smi
+  "not found" warning is printed once per process instead of on every poll;
+  new `--tokenizer ID_OR_PATH` flag (or `VLLM_BENCH_TOKENIZER`) overrides the
+  tokenizer used for prompt generation and token counting, for gated or
+  locally-served models.
 - **Multi-GPU hosts** — `nvidia-smi` prints one line per GPU; `SystemInfo` now
   parses per line, sums `total_vram_gb`, collapses identical names to
   `"Nx <name>"` and records `gpu_count` (fixes #2).
