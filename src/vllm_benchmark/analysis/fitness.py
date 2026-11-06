@@ -512,8 +512,17 @@ def fitness_verdict(grades: dict[str, FitnessGrade]) -> str:
     best = max(graded, key=lambda g: rank[g.grade])
     worst = min(graded, key=lambda g: rank[g.grade])
     best_label = PROFILE_LABELS.get(best.profile, best.profile)
-    worst_label = PROFILE_LABELS.get(worst.profile, worst.profile)
 
+    # The "avoid" half only makes sense when some graded profile is
+    # strictly weaker than the best one.  With a single graded profile, or
+    # when every graded profile shares the top grade, naming one to avoid
+    # would mean naming the same (or an equally good) profile twice.
+    if worst is best or rank[worst.grade] == rank[best.grade]:
+        if len(graded) == 1:
+            return f"Best for: {best_label} ({best.grade}); other profiles have insufficient data."
+        return f"Best for: {best_label}; all graded profiles are {best.grade.lower()}."
+
+    worst_label = PROFILE_LABELS.get(worst.profile, worst.profile)
     avoid = f"avoid for: {worst_label}"
     if worst.limiting_factor:
         avoid += f" (limited by {worst.limiting_factor})"
