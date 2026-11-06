@@ -250,7 +250,7 @@ GPU names are matched by token, so `NVIDIA A100-SXM4-80GB`, `NVIDIA H100 80GB HB
 **GitHub Action.** The repo ships a composite action that installs the suite, runs a preset against a server the runner can reach, uploads the results directory, exposes `score`, `grade`, `peak-throughput` and `results-json` as outputs, and can fail the job on major regressions against a stored baseline.
 
 ```yaml
-- uses: notaDestroyer/vllm-benchmark-suite@v4.1.0
+- uses: notaDestroyer/vllm-benchmark-suite@v4.2.0
   id: bench
   with:
     vllm-url: http://localhost:8000
