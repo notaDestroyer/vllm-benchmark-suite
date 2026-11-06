@@ -9,6 +9,12 @@ NVIDIA's published figure where the formula's clock basis differs or the part is
 
 To add a card: add one `Sku(...)` line to the script and run `python scripts/gen_gpu_specs.py`.
 
+## Blackwell Ultra (GB300)
+
+| Key | nvidia-smi name | Memory | GB/s | BF16 | FP8 | FP4 | Source |
+|---|---|---|---|---|---|---|---|
+| B300 | `NVIDIA B300` | 288 GB | 7,997 | 2,250 | 4,500 | 15,000 | datasheet |
+
 ## Blackwell (GB100)
 
 | Key | nvidia-smi name | Memory | GB/s | BF16 | FP8 | FP4 | Source |
@@ -19,15 +25,25 @@ To add a card: add one `Sku(...)` line to the script and run `python scripts/gen
 
 | Key | nvidia-smi name | Memory | GB/s | BF16 | FP8 | FP4 | Source |
 |---|---|---|---|---|---|---|---|
-| RTX PRO 6000 Blackwell | `NVIDIA RTX PRO 6000 Blackwell Workstation Edition` | 96 GB | 1,792 | 504 | 1,008 | 2,015 | derived |
-| RTX PRO 5000 Blackwell | `NVIDIA RTX PRO 5000 Blackwell` | 48 GB | 1,344 | 295 | 590 | 1,179 | derived |
-| RTX PRO 4500 Blackwell | `NVIDIA RTX PRO 4500 Blackwell` | 32 GB | 896 | 220 | 439 | 879 | derived |
+| RTX PRO 6000 Blackwell | `NVIDIA RTX PRO 6000 Blackwell Workstation Edition` | 96 GB | 1,792 | 504 | 1,008 | 2,015 | datasheet |
+| RTX PRO 6000 Blackwell Server Edition | `NVIDIA RTX PRO 6000 Blackwell Server Edition` | 96 GB | 1,597 | 475 | 950 | 1,900 | datasheet |
+| RTX PRO 5000 Blackwell | `NVIDIA RTX PRO 5000 Blackwell` | 48 GB | 1,344 | 268 | 536 | 1,071 | datasheet |
+| RTX PRO 4500 Blackwell | `NVIDIA RTX PRO 4500 Blackwell` | 32 GB | 896 | 202 | 404 | 808 | datasheet |
+| RTX PRO 4500 Blackwell Server Edition | `NVIDIA RTX PRO 4500 Blackwell Server Edition` | 32 GB | 800 | 202 | 404 | 808 | datasheet |
+| RTX PRO 4000 Blackwell | `NVIDIA RTX PRO 4000 Blackwell` | 24 GB | 672 | 161 | 323 | 645 | datasheet |
 | RTX 5090 | `NVIDIA GeForce RTX 5090` | 32 GB | 1,792 | 210 | 419 | 838 | derived |
 | RTX 5080 | `NVIDIA GeForce RTX 5080` | 16 GB | 960 | 113 | 225 | 450 | derived |
 | RTX 5070 Ti | `NVIDIA GeForce RTX 5070 Ti` | 16 GB | 896 | 88 | 176 | 352 | derived |
 | RTX 5070 | `NVIDIA GeForce RTX 5070` | 12 GB | 672 | 62 | 123 | 247 | derived |
 | RTX 5060 Ti | `NVIDIA GeForce RTX 5060 Ti` | 16 GB | 448 | 47 | 95 | 190 | derived |
 | RTX 5060 | `NVIDIA GeForce RTX 5060` | 8 GB | 448 | 38 | 77 | 154 | derived |
+| RTX 5050 | `NVIDIA GeForce RTX 5050` | 8 GB | 320 | 26 | 53 | 105 | derived |
+
+## Blackwell (GB10)
+
+| Key | nvidia-smi name | Memory | GB/s | BF16 | FP8 | FP4 | Source |
+|---|---|---|---|---|---|---|---|
+| GB10 | `NVIDIA GB10` | 128 GB | 273 | 125 | 250 | 500 | datasheet |
 
 ## Hopper
 

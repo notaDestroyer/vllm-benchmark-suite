@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Blackwell detection with short driver names** — some drivers report the
+  Blackwell workstation card as plain `NVIDIA RTX PRO 6000`; the matcher required
+  the generation word, so the card got a score baseline and a price but no
+  roofline spec. Generation words (`Ada`, `Blackwell`) are now optional in the
+  detected name; a different generation word or Quadro-era branding still rejects.
+- **GPU table corrected against current NVIDIA/partner spec pages** — the RTX
+  PRO 6000 Blackwell *Server Edition* is its own entry (1597 GB/s, 3.8 PF sparse
+  FP4, 400–600 W), as is the RTX PRO 4500 Server Edition (800 GB/s); RTX PRO
+  5000 / 4500 / 4000 BF16 peaks are pinned from NVIDIA's published AI TOPS
+  (2142 / 1617 / 1290) instead of an assumed boost clock, which the formula had
+  over-stated by 10–15 %; RTX PRO 5000 noted as 14,080 cores with a 72 GB
+  variant.
+
+### Added
+- GPU table: B300 (Blackwell Ultra, cc 10.3, dense FP4 15 PF), GB10 (DGX Spark,
+  cc 12.1), RTX 5050 (GDDR6), RTX PRO 4000 Blackwell; 55 cards in total.
+  `docs/gpus.md` is generated alongside the JSON and lists every card with its
+  nvidia-smi name and peaks; the README links to it.
+- Derivation constants for compute capability 10.3 (Blackwell Ultra: dense FP4 is
+  6x FP16) and 12.1 (GB10: full-rate tensor cores).
+
 ## v4.2.1 - Generated GPU Table (2026-11-06)
 
 The curated roofline table is now generated from per-SKU facts and covers
