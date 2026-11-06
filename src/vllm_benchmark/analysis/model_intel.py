@@ -357,6 +357,37 @@ def kv_bytes_per_token(
     return int(2 * num_layers * num_kv_heads * head_dim * bpp)
 
 
+def mla_kv_bytes_per_token(
+    num_layers: Optional[int],
+    kv_latent_dim: Optional[int],
+    kv_dtype: Optional[str],
+) -> Optional[int]:
+    """Bytes of KV cache per token for Multi-head Latent Attention (MLA).
+
+    MLA (DeepSeek-V2/V3) caches a single compressed latent of width
+    ``kv_lora_rank + qk_rope_head_dim`` per layer per token instead of
+    per-head K and V tensors, so the formula is
+    ``layers * kv_latent_dim * bytes(kv_dtype)`` with no factor of 2.
+
+    Returns ``None`` if any structural input is missing.
+    """
+    if not num_layers or not kv_latent_dim:
+        return None
+    return int(num_layers * kv_latent_dim * bytes_per_param(kv_dtype))
+
+
+def mla_latent_dim(config: dict) -> Optional[int]:
+    """Return the MLA KV latent width from a HF config, or ``None``.
+
+    Recognises the DeepSeek-style ``kv_lora_rank`` (+ ``qk_rope_head_dim``)
+    fields.  Non-MLA configs return ``None``.
+    """
+    rank = config.get("kv_lora_rank")
+    if not rank:
+        return None
+    return int(rank) + int(config.get("qk_rope_head_dim") or 0)
+
+
 def compute_active_params(config_or_kb: dict) -> Optional[int]:
     """Estimate the number of *active* parameters per forward token.
 
@@ -468,13 +499,17 @@ def _profile_from_config(name: str, config: dict, server: ServerInfo) -> ModelPr
     head_dim = config.get("head_dim")
     if not head_dim and hidden and n_heads:
         head_dim = hidden // n_heads
+    latent = mla_latent_dim(config)
 
     num_experts = config.get("num_experts") or config.get("num_local_experts")
     experts_per_tok = config.get("experts_per_tok") or config.get("num_experts_per_tok")
     is_moe = bool(num_experts) and bool(experts_per_tok)
 
     kv_dtype = server.kv_cache_dtype or server.dtype
-    kvbpt = kv_bytes_per_token(num_layers, n_kv, head_dim, kv_dtype)
+    if latent:
+        kvbpt = mla_kv_bytes_per_token(num_layers, latent, kv_dtype)
+    else:
+        kvbpt = kv_bytes_per_token(num_layers, n_kv, head_dim, kv_dtype)
 
     profile = ModelProfile(
         name=name,
@@ -524,9 +559,15 @@ def _profile_from_kb(name: str, entry: dict, server: ServerInfo) -> ModelProfile
     n_heads = entry.get("num_attention_heads")
     n_kv = entry.get("num_kv_heads")
     hidden = entry.get("hidden_size")
-    head_dim = hidden // n_heads if hidden and n_heads else None
+    # Prefer the curated head_dim: hidden // heads is wrong for models with a
+    # decoupled head dimension (Gemma-2, Qwen3-MoE) and meaningless for MLA.
+    head_dim = entry.get("head_dim") or (hidden // n_heads if hidden and n_heads else None)
     kv_dtype = server.kv_cache_dtype or server.dtype
-    kvbpt = kv_bytes_per_token(entry.get("num_layers"), n_kv, head_dim, kv_dtype)
+    latent = entry.get("kv_latent_dim")
+    if latent:
+        kvbpt = mla_kv_bytes_per_token(entry.get("num_layers"), latent, kv_dtype)
+    else:
+        kvbpt = kv_bytes_per_token(entry.get("num_layers"), n_kv, head_dim, kv_dtype)
     return ModelProfile(
         name=name,
         family=entry.get("family"),
@@ -566,8 +607,18 @@ def _profile_from_name(name: str, server: ServerInfo) -> ModelProfile:
     )
 
 
-def _finalize_params(profile: ModelProfile, config: Optional[dict], total_size: Optional[int]) -> None:
-    """Fill total/active params + weight bytes and cross-check against KB."""
+def _finalize_params(
+    profile: ModelProfile,
+    config: Optional[dict],
+    total_size: Optional[int],
+    quantization: Optional[str] = None,
+) -> None:
+    """Fill total/active params + weight bytes and cross-check against KB.
+
+    ``quantization`` (the served weight format, e.g. ``"fp8"``/``"awq"``)
+    sets bytes-per-parameter for the derived ``weight_bytes``; ``None``
+    means 16-bit weights.
+    """
     # Total params from safetensors index (most authoritative).
     if total_size and profile.total_params is None:
         # safetensors total_size is bytes; convert with the serving dtype.
@@ -611,10 +662,13 @@ def _finalize_params(profile: ModelProfile, config: Optional[dict], total_size: 
     if profile.active_params is None and profile.is_moe is False and profile.total_params:
         profile.active_params = profile.total_params
 
-    # Derive weight_bytes from params when we have a dtype.
+    # Derive weight_bytes from params using the served weight format
+    # (FP8/INT8 -> 1 B, INT4/AWQ/GPTQ -> 0.5 B, else 2 B).
     if profile.weight_bytes is None and profile.total_params:
-        # Use bytes-per-param of serving dtype if available; default 2.
-        profile.weight_bytes = int(profile.total_params * 2)
+        bpp = bytes_per_param(quantization)
+        profile.weight_bytes = int(profile.total_params * bpp)
+        if quantization and bpp != 2.0:
+            profile.notes.append(f"weight_bytes assumes {bpp} B/param for quantization={quantization}.")
 
 
 def build_profile(
@@ -670,7 +724,7 @@ def build_profile(
         profile.notes.append(f"Server reports quantization={server_info.quantization}.")
 
     try:
-        _finalize_params(profile, config, total_size)
+        _finalize_params(profile, config, total_size, quantization=server_info.quantization)
     except Exception:
         # Never let param accounting raise.
         pass
