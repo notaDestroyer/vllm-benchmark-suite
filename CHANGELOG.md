@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Generated GPU spec table, Ampere to Blackwell** — `scripts/gen_gpu_specs.py`
+  derives `data/gpu_specs.json` from per-SKU SM count, boost clock, bus width
+  and memory data rate with the same formulas as the live NVML path; 49 cards:
+  A100 (SXM/PCIe/40GB), A30, A40, A10, A10G, RTX A6000/A5000/A4000, RTX 3060 to
+  3090 Ti, L40S, L40, L4, RTX 6000/5000/4000 Ada, RTX 4060 to 4090, H100
+  SXM/PCIe/NVL, H200, H20, B200, RTX PRO 6000/5000/4500 Blackwell, RTX 5060 to
+  5090, T4. Entries record their inputs, their source (`derived` or
+  `datasheet`) and a real nvidia-smi name; tests assert the committed JSON
+  matches the generator and every name resolves to its own key.
+
+### Fixed
+- `gpu_specs.json`: RTX 6000 Ada was listed at the GeForce-halved rate
+  (182 TFLOPS); the professional part runs full rate (364). L40 is now a
+  separate entry at its real half rate instead of resolving to the L40S.
+- GPU name matching: a `Ti` / `SUPER` suffix in the detected name now requires
+  the same suffix in the table key, so a 3080 Ti no longer resolves to the 3080
+  entry.
+
 ## v4.2.0 - Know Your GPU (2026-11-06)
 
 The suite now learns the GPU from the GPU: roofline peaks are derived from the

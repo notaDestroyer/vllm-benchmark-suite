@@ -28,15 +28,23 @@ from vllm_benchmark.core.metrics import MetricsMonitor, _parse_prom_line, parse_
 # 1. GPU matcher: family prefix alone never matches
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("name", [
-    "NVIDIA GeForce RTX 3090", "NVIDIA GeForce RTX 4080", "NVIDIA RTX A6000",
-    "NVIDIA RTX 6000", "NVIDIA GeForce RTX 3080 Ti", "NVIDIA A40", "NVIDIA A30",
+@pytest.mark.parametrize("name, spec_key", [
+    ("NVIDIA GeForce RTX 3090", "RTX 3090"),
+    ("NVIDIA GeForce RTX 4080", "RTX 4080"),
+    ("NVIDIA RTX A6000", "RTX A6000"),
+    ("NVIDIA RTX 6000", None),             # Quadro RTX 6000 (Turing): not in any table
+    ("NVIDIA GeForce RTX 3080 Ti", "RTX 3080 Ti"),
+    ("NVIDIA A40", "A40"),
+    ("NVIDIA A30", "A30"),
 ])
-def test_unknown_rtx_cards_match_nothing(name):
+def test_family_prefix_never_claims_a_different_card(name, spec_key):
+    # None of these are RTX 4090s: no score baseline, no price ...
     assert match_gpu_key(name, GPU_BASELINES.keys()) is None
     assert match_gpu_key(name, GPU_PRICING.keys()) is None
-    assert match_gpu_spec(name) is None
     assert VLLMScore._match_gpu_baseline(name) == (None, None)
+    # ... and the roofline table resolves them to their own entry or to nothing.
+    spec = match_gpu_spec(name)
+    assert (spec["_matched_key"] if spec else None) == spec_key
 
 
 @pytest.mark.parametrize("name, expected", [
