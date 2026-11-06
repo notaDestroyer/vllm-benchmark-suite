@@ -30,6 +30,7 @@ import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter, NullFormatter
 
 #: Validated categorical slots (light surface), fixed order.
 SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"]
@@ -58,6 +59,14 @@ def _style(ax) -> None:
     ax.title.set_color(INK)
 
 
+def _plain_log_ticks(ax) -> None:
+    """Plain numbers on log axes (1, 4, 16 / 100, 300) instead of 2^n / 3x10^2."""
+    fmt = FuncFormatter(lambda v, _pos: f"{v:,.0f}" if v >= 1 else f"{v:g}")
+    for axis in (ax.xaxis, ax.yaxis):
+        axis.set_major_formatter(fmt)
+        axis.set_minor_formatter(NullFormatter())
+
+
 def plot_capacity(capacity: Optional[dict], out_path: str, *, title: str = "Capacity & ceilings") -> str:
     """Render the capacity figure; always writes a PNG (placeholder when empty)."""
     capacity = capacity or {}
@@ -77,7 +86,11 @@ def plot_capacity(capacity: Optional[dict], out_path: str, *, title: str = "Capa
         color = SERIES[i]
         rows = sorted((c for c in ceilings if c["context_length"] == ctx), key=lambda c: c["concurrent_users"])
         xs = [r["concurrent_users"] for r in rows]
-        ax.plot(xs, [r["decode_ceiling_tps"] for r in rows], color=color, linewidth=2, alpha=0.9, label=f"{_fmt_ctx(ctx)} ceiling")
+        # A context measured at a single concurrency has no line to draw;
+        # mark the ceiling with a hollow point so the legend entry is honest.
+        ax.plot(xs, [r["decode_ceiling_tps"] for r in rows], color=color, linewidth=2, alpha=0.9,
+                marker="o" if len(xs) == 1 else None, markersize=9, markerfacecolor=SURFACE, markeredgewidth=2,
+                label=f"{_fmt_ctx(ctx)} ceiling")
         meas = [(r["concurrent_users"], r["decode_measured_tps"]) for r in rows if r.get("decode_measured_tps")]
         if meas:
             ax.plot([m[0] for m in meas], [m[1] for m in meas], linestyle="none", marker="o", markersize=7,
@@ -96,6 +109,7 @@ def plot_capacity(capacity: Optional[dict], out_path: str, *, title: str = "Capa
     if ceilings:
         ax.set_xscale("log", base=2)
         ax.set_yscale("log")
+        _plain_log_ticks(ax)
         ax.set_xlabel("Concurrent users")
         ax.set_ylabel("Aggregate decode tok/s")
         ax.set_title("Measured vs roofline ceiling", fontsize=11, loc="left")
