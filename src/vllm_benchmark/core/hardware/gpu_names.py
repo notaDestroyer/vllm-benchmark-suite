@@ -54,6 +54,10 @@ def normalize_gpu_name(name: Optional[str]) -> list[str]:
 #: designator and must be present verbatim.
 _SOFT_TOKENS = frozenset({"sxm", "sxm4", "sxm5", "pcie", "nvl", "hbm3", "hbm2e"})
 
+#: Variant suffixes that change the silicon (a 3080 Ti is not a 3080, a 4080
+#: SUPER is not a 4080).  When the *name* carries one, the key must too.
+_VARIANT_TOKENS = frozenset({"ti", "super"})
+
 
 def _is_soft(token: str) -> bool:
     return token in _SOFT_TOKENS or bool(_MEM_RE.match(token))
@@ -75,11 +79,16 @@ def _score(name_tokens: list[str], key_tokens: list[str]) -> Optional[float]:
       HBM3"`` and ``"A100-80GB"`` still fits a bare ``"NVIDIA A100"``.
     * A memory-size key token that *contradicts* the name (``40gb`` when
       the name says ``80gb``) rejects the key.
+    * A variant suffix in the name (``Ti``, ``SUPER``) that the key lacks
+      rejects the key: those are different dies.
     * Score = tokens matched minus ``0.1`` per missing soft token.
     """
     if not key_tokens or not name_tokens:
         return None
     name_set = set(name_tokens)
+    key_set = set(key_tokens)
+    if any(t in _VARIANT_TOKENS and t not in key_set for t in name_tokens):
+        return None  # "RTX 3080 Ti" must not resolve to the "RTX 3080" entry
     name_mem = {t for t in name_tokens if _MEM_RE.match(t)}
     matched = 0
     missing = 0
