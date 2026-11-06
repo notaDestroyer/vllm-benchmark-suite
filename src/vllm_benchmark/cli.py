@@ -210,6 +210,11 @@ Examples:
     analysis = parser.add_argument_group("Analysis")
     analysis.add_argument("--bottleneck-sweep", action="store_true",
                           help="Run prefill/decode roofline probes to find the empirical critical batch")
+    analysis.add_argument("--detailed-summary", action="store_true",
+                          help="Print the full per-cell performance summary tables after the run")
+    analysis.add_argument("--leaderboard", nargs="?", const="./outputs", default=None, metavar="DIR",
+                          help="Standalone: build LEADERBOARD.md from result_*.json files in DIR "
+                               "(default: ./outputs) and exit")
 
     report = parser.add_argument_group("AI analyst report")
     report.add_argument("--ai-report", action="store_true",
@@ -420,6 +425,56 @@ def _run_compare_quants(paths: list[str], output_dir: str) -> None:
     console.print(f"[green]JSON:[/green]  {json_path}")
 
 
+def _run_leaderboard(results_dir: str) -> str:
+    """Render the community leaderboard from ``result_*.json`` files.
+
+    Prints the Markdown table and writes it to ``<results_dir>/LEADERBOARD.md``.
+    Returns the path written.
+    """
+    from pathlib import Path
+
+    from vllm_benchmark.analysis.publish import generate_leaderboard_md
+
+    md = generate_leaderboard_md(results_dir)
+    console.print(md)
+    out = Path(results_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / "LEADERBOARD.md"
+    path.write_text(md, encoding="utf-8")
+    console.print(f"[green]Leaderboard:[/green] {path}")
+    return str(path)
+
+
+def _write_analysis_charts(
+    results: list[dict],
+    model_profile: dict | None,
+    gpu_spec: dict | None,
+    bottlenecks: list[dict],
+    output_dir: str,
+    timestamp: str,
+) -> list[str]:
+    """Render the roofline and bottleneck-map PNGs next to the main chart.
+
+    Each chart is skipped (never fatal) when its inputs are absent or the
+    renderer raises.  Returns the list of paths written.
+    """
+    from vllm_benchmark.reports.charts import ensure_output_directory, plot_bottleneck_map, plot_roofline
+
+    out = ensure_output_directory(output_dir)
+    written: list[str] = []
+    if model_profile or gpu_spec:
+        try:
+            written.append(plot_roofline(results, model_profile, gpu_spec, str(out / f"roofline_{timestamp}.png")))
+        except Exception as exc:  # charts must never break the run
+            console.print(f"  [yellow]Roofline chart skipped:[/yellow] {exc}")
+    if bottlenecks:
+        try:
+            written.append(plot_bottleneck_map(bottlenecks, str(out / f"bottleneck_map_{timestamp}.png")))
+        except Exception as exc:
+            console.print(f"  [yellow]Bottleneck map skipped:[/yellow] {exc}")
+    return written
+
+
 # ------------------------------------------------------------------
 # Head-to-head A/B (thin orchestration over the tested core)
 # ------------------------------------------------------------------
@@ -489,6 +544,11 @@ def main():
     # ---- Standalone quant comparison (no server run needed) ----
     if args.compare_quants:
         _run_compare_quants(args.compare_quants, args.output_dir)
+        sys.exit(0)
+
+    # ---- Standalone leaderboard (no server run needed) ----
+    if args.leaderboard is not None:
+        _run_leaderboard(args.leaderboard)
         sys.exit(0)
 
     # Build config
@@ -869,6 +929,7 @@ def main():
     model_profile_dict = None
     bottleneck_dicts: list[dict] = []
     advisory_dict = None
+    gpu_spec = None
     try:
         from vllm_benchmark.analysis.advisor import build_advisory
         from vllm_benchmark.analysis.bottleneck import classify_run
@@ -1080,6 +1141,13 @@ def main():
         summary_table.add_row("Cost / 1M tokens", f"${best_cost:.4f}", "Best configuration")
     console.print(summary_table)
 
+    if args.detailed_summary:
+        from vllm_benchmark.reports.terminal import print_summary_table
+        try:
+            print_summary_table(reporting_results)
+        except Exception as exc:  # presentation only, never fatal
+            console.print(f"[yellow]Detailed summary skipped:[/yellow] {exc}")
+
     # ---- Analysis panels (model intel / bottleneck / fitness) ----
     from vllm_benchmark.reports.terminal import (
         render_bottleneck_panel,
@@ -1099,6 +1167,10 @@ def main():
         from vllm_benchmark.reports.charts import visualize_results
         viz_file = visualize_results(reporting_results, model_name, system_info, server_info, config.output_tokens, config.output_dir)
         console.print(f"  [green]Charts:[/green] {viz_file}")
+        for extra in _write_analysis_charts(
+            reporting_results, model_profile_dict, gpu_spec, bottleneck_dicts, config.output_dir, timestamp,
+        ):
+            console.print(f"  [green]Chart:[/green]  {extra}")
 
     # ---- HTML report ----
     if config.generate_html:
