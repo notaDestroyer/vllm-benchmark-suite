@@ -1,5 +1,73 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Multi-GPU hosts** — `nvidia-smi` prints one line per GPU; `SystemInfo` now
+  parses per line, sums `total_vram_gb`, collapses identical names to
+  `"Nx <name>"` and records `gpu_count` (fixes #2).
+- **`--prompts-file` was a no-op** — the flag was stored but never read. Custom
+  prompts are now validated up front and cycled across the concurrent requests
+  of every cell; cells report `prompt_type=custom`, `prompt_source`,
+  `prompts_file` and `num_custom_prompts`.
+- **`--vs` always reported ties** — head-to-head looked for `*_samples` lists the
+  engine never produced, so every comparison ran on n=1 point estimates. Cells
+  now carry `latency_samples`, `ttft_samples`, `prefill_tps_samples`,
+  `decode_tps_samples` and `request_tps_samples`; plain `prefill_tps` /
+  `decode_tps` aliases are emitted. The latency comparison, previously sampled
+  from raw latencies but labelled `latency_p99`, is now `avg_latency`; verdicts
+  carry `point_a`/`point_b` beside `mean_a`/`mean_b`.
+- **`--iterations > 1` degraded the analysis** — aggregation kept only four
+  metrics. Every numeric field is now the median across iterations, sample
+  lists are pooled, non-numeric fields are carried, and `n_iterations` is set.
+- **Unreachable bottleneck classes** — `kv_capacity` / `interconnect` (and the
+  waiting-requests `queue` path) read server signals that nothing attached to
+  cells. `MetricsMonitor` now parses vLLM *and* SGLang metric names, polls during
+  the cell and attaches peak `gpu_cache_usage_perc`, `num_requests_waiting`,
+  `num_requests_running` and the `preemptions` delta; `tensor_parallel` is
+  stamped on cells and passed to `classify_run`.
+- **KL quality never reached the analyst report** — the bundle read
+  `kl_divergence` while the KL mode emits `mean_kl` / `top1_agreement`. All
+  numeric quality facts (probe CI, perplexity token counts, KL agreement) and
+  the full `ScoreBreakdown` (new `to_dict()`) are now carried.
+- **Wrong `head_dim` in the model KB** — `hidden // heads` gave 224 for
+  Gemma-2-9B (actual 256), 144 for Gemma-2-27B (128) and 64 for Qwen3-30B-A3B /
+  235B-A22B (128), skewing KV bytes, MBU and bottleneck verdicts. Every KB entry
+  carries an explicit `head_dim`; DeepSeek-V3 uses MLA latent KV math
+  (`layers × latent × bytes`, no K/V doubling), also honoured for live HF
+  configs with `kv_lora_rank`.
+- **`weight_bytes` ignored quantization** — now `total_params × bytes_per_param`
+  of the served format (FP8/INT8 → 1 B, AWQ/GPTQ/INT4 → 0.5 B).
+- **`publish.py`** — read `tensor_parallel_size` (ServerInfo emits
+  `tensor_parallel`), raised on cells without `avg_latency` or with
+  `ttft_estimate=None`, and labelled local time as UTC.
+- **HTML report** — model names, levers, verdicts, diagnostics and system fields
+  were interpolated unescaped and the results JSON could break the inline
+  `<script>`; everything is escaped now. The footer reported a hard-coded
+  v3.0.0 and the docstring claimed no external dependencies (Plotly loads from
+  its CDN).
+- **GPU baseline matching** — `"NVIDIA A100-SXM4-80GB"` and friends matched no
+  scoring baseline or price. One token-based matcher
+  (`core.hardware.gpu_names.match_gpu_key`) now serves scoring, pricing and the
+  roofline spec table; auto-detected cost is multiplied by the GPU count.
+- `gpu_spec` is initialised before the analysis stage so a failed analysis cannot
+  leave it undefined for charts.
+
+### Added
+- `roofline_*.png` and `bottleneck_map_*.png` are written with every charted run.
+- `--leaderboard [DIR]` standalone mode writes `LEADERBOARD.md` from
+  `result_*.json` files; `--detailed-summary` prints the per-cell tables.
+- README sections for the composite GitHub Action and the Grafana dashboard.
+
+### Changed
+- The governing-verdict selection, the `N/A` formatter and the CI-overlap helpers
+  each have a single implementation (`bottleneck.top_verdict`,
+  `reports.formatting.na`, `statistics.point_ci` / `cis_overlap`). The verdict
+  tie-break now prefers the highest-concurrency cell among equal confidence.
+- SciPy import fallbacks (manual Welch t-test, bootstrap/normal approximations)
+  were unreachable since SciPy became a hard dependency and are removed.
+- The CSV keeps scalar columns only; sample lists and nested stats live in the JSON.
+
 ## v4.0.0 - Benchmark & Compare (2026-06-07)
 
 The v4 release turns the suite from a vLLM-only benchmarker into a **model-aware

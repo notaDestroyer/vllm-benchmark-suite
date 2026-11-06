@@ -89,6 +89,10 @@ vllm-bench --bottleneck-sweep
 
 This sweeps prefill and decode probes across batch sizes and reports the empirical critical batch alongside the analytic one.
 
+Two extra PNGs are written with every charted run: `roofline_*.png` (the hardware roofline with the ridge point and measured prefill/decode operating points) and `bottleneck_map_*.png` (context × concurrency, coloured by governing bottleneck, with B\* annotated).
+
+The `kv_capacity`, `queue` and `interconnect` classes are driven by server-side signals that the suite samples from `/metrics` during each cell (vLLM and SGLang names are both understood): peak `gpu_cache_usage_perc`, peak `num_requests_waiting` / `num_requests_running` and the `preemptions` delta are attached to every result cell, and `tensor_parallel` is stamped from the server's reported parallelism.
+
 ---
 
 ## Quality Measurement
@@ -124,6 +128,8 @@ The statistics layer provides:
 
 The governing rule: a **real difference is one that is both statistically significant *and* practically significant** (a non-trivial effect size). A tiny but "significant" delta from a huge sample is reported as noise, not a win. Degenerate/empty samples degrade gracefully instead of emitting `nan`.
 
+With `--iterations N` every numeric metric in a cell (prefill/decode split, percentiles, GPU telemetry, cost, failure counts) is the median across iterations, so bottleneck, fitness and scoring see the same schema as a single run; the four headline metrics additionally carry `*_ci_lower`/`*_ci_upper`, a `*_stats` dict and a cross-iteration `*_samples` list, and `n_iterations` records the count.
+
 `--seed` fixes `random.seed` and `numpy.random.seed`. A full environment fingerprint (kernel, CPU governor, GPU clocks, driver, package versions) is captured as a SHA-256 hash and printed at the end of every run.
 
 ---
@@ -139,7 +145,8 @@ vllm-bench --standard --vs http://other-server:8000    # vLLM-vs-SGLang head-to-
 - **`--share`** writes `share_*.md`, a Reddit/forum-ready Markdown summary you can paste directly.
 - **Result card** — a shareable result-card PNG (`result_card.png`) is available via the `render_result_card` reporting API.
 - **`--compare-quants FILE...`** compares multiple result JSONs across quantizations/models, with Holm-corrected significance and a `quant_compare_*.png` chart.
-- **`--vs URL2`** re-runs the identical matrix against a second endpoint and reports a head-to-head A/B (`head_to_head_*.json`) — ideal for vLLM vs SGLang on the same model and hardware.
+- **`--vs URL2`** re-runs the identical matrix against a second endpoint and reports a head-to-head A/B (`head_to_head_*.json`) — ideal for vLLM vs SGLang on the same model and hardware. The comparison runs on the per-request sample lists each cell carries (`latency_samples`, `ttft_samples`, `prefill_tps_samples`, `decode_tps_samples`, `request_tps_samples`), or on cross-iteration samples when `--iterations` is used, so Welch / Mann-Whitney tests have real spread. Metrics compared: `tokens_per_second`, `ttft_estimate`, `prefill_tps`, `decode_tps`, `avg_latency`. A winner is declared only when the difference is statistically and practically significant after Holm correction and the bootstrap CIs do not overlap; otherwise the cell is a tie.
+- **`--leaderboard [DIR]`** builds `LEADERBOARD.md` from the `result_*.json` entries in a directory (default `./outputs`) without touching a server.
 
 ---
 
@@ -218,7 +225,7 @@ vllm-bench --standard --cost 2.21       # explicit $/hr
 vllm-bench --standard                   # auto-detected from GPU name
 ```
 
-Reported per test: cost per 1M tokens and total cost for that configuration. Known cloud on-demand rates are built in for H100, A100 (80/40GB), L40S, RTX 4090, T4, and others.
+Reported per test: cost per 1M tokens and total cost for that configuration. Known cloud on-demand rates are built in for H100, A100 (80/40GB), L40S, RTX 4090, T4, and others; the auto-detected rate is per GPU and is multiplied by the detected GPU count. GPU names are matched by token (so `NVIDIA A100-SXM4-80GB`, `NVIDIA H100 80GB HBM3` and `4x NVIDIA H100 80GB HBM3` all resolve), with the same matcher used for the score baselines and the roofline spec table.
 
 ---
 
@@ -236,10 +243,10 @@ Four strategies let you control prefix cache behaviour:
 Or use your own:
 
 ```bash
-vllm-bench --prompts-file production_prompts.jsonl
+vllm-bench --prompts-file production_prompts.jsonl --concurrency 1,4,8
 ```
 
-JSONL format: one JSON object per line with a `"prompt"` key.
+JSONL format: one JSON object per line with a `"prompt"` key. The file is validated before the server is touched. Prompts are cycled across the concurrent requests of every cell (request *i* gets prompt `i mod N`), the cell's `prompt_type` is reported as `custom`, and `prompt_source`, `prompts_file` and `num_custom_prompts` are recorded in each result. The `--context-lengths` axis only labels the matrix in this mode: the real prompt length is whatever your file contains and is reported as `avg_prompt_tokens`.
 
 ---
 
@@ -293,8 +300,10 @@ Each run writes to `./outputs/` (override with `--output-dir`):
 | File | Description |
 |------|-------------|
 | `benchmark_*.json` | All results + metadata (`schema_version`, system/server info, environment fingerprint, `model_profile`, `bottlenecks`, `advisory`, `quality`) |
-| `benchmark_*.csv` | Tabular results for spreadsheet analysis |
+| `benchmark_*.csv` | Tabular results for spreadsheet analysis (scalar columns only; sample lists live in the JSON) |
 | `benchmark_*.png` | Publication-quality charts (300 DPI) |
+| `roofline_*.png` | Roofline plot with ridge point and measured operating points |
+| `bottleneck_map_*.png` | Context × concurrency governing-bottleneck map |
 | `benchmark_*.html` | Self-contained interactive report (Plotly), embeds the analyst report when generated |
 | `share_*.md` | Copy-paste Markdown summary (`--share`) |
 | `report_*.md` | AI analyst report (`--ai-report`) |
@@ -302,6 +311,7 @@ Each run writes to `./outputs/` (override with `--output-dir`):
 | `quant_compare_*.png` | Quantization/model comparison chart (`--compare-quants`) |
 | `head_to_head_*.json` | Head-to-head A/B results (`--vs`) |
 | `result_*.json` | Standardised entry for community leaderboard (optional) |
+| `LEADERBOARD.md` | Markdown leaderboard built from `result_*.json` files (`--leaderboard`) |
 
 ---
 
@@ -323,11 +333,15 @@ Each run writes to `./outputs/` (override with `--output-dir`):
 
 **Quality** (`quality` section): mode, status, and `score` (probe) / perplexity / KL as applicable
 
-**GPU** (nvidia-smi): `avg_gpu_util`, `max_gpu_util`, `avg_mem_used`, `avg_temperature`, `avg_power`, `avg_gpu_clock`
+**GPU** (nvidia-smi): `avg_gpu_util`, `max_gpu_util`, `avg_mem_used`, `avg_temperature`, `avg_power`, `avg_gpu_clock`. On multi-GPU hosts `system_info.gpu_name` is collapsed to `"Nx <name>"`, `gpu_count` is recorded and `total_vram_gb` is summed across GPUs.
 
 **Energy**: `tokens_per_watt`, `watts_per_token`, `energy_joules`
 
-**Cache** (server `/metrics`): `cache_hit_rate`, `actual_prefill_time`, `actual_decode_time`
+**Cache & scheduler** (server `/metrics`, sampled during the cell): `cache_hit_rate`, `actual_prefill_time`, `actual_decode_time`, peak `gpu_cache_usage_perc`, peak `num_requests_waiting`, peak `num_requests_running`, `preemptions` (delta), `tensor_parallel`
+
+**Samples** (per request, for A/B statistics): `latency_samples`, `ttft_samples`, `prefill_tps_samples`, `decode_tps_samples`, `request_tps_samples`
+
+**Prompt provenance**: `prompt_source` (`generated`/`file`), `prompts_file`, `num_custom_prompts`
 
 **Cost** (when available): `cost_per_hour`, `cost_per_1m_tokens`, `cost_total`
 
@@ -357,7 +371,7 @@ Test Parameters:
   --concurrency          Comma-separated, e.g. 1,4,8,16
   --output-tokens N      Max output tokens per request (default: 500)
   --prompt-type TYPE     classic|deterministic|madlib|random|all
-  --prompts-file PATH    Custom prompts JSONL file
+  --prompts-file PATH    Custom prompts JSONL file (cycled across requests; prompt_type=custom)
   --rps FLOAT            Sustained requests-per-second mode
   --duration FLOAT       Duration for sustained RPS run (default: 120s)
   --iterations N         Iterations per config for confidence intervals (default: 1)
@@ -372,6 +386,8 @@ Quality:
 
 Analysis:
   --bottleneck-sweep     Run prefill/decode roofline probes for the critical batch
+  --detailed-summary     Print the full per-cell summary tables after the run
+  --leaderboard [DIR]    Standalone: write LEADERBOARD.md from result_*.json in DIR and exit
 
 Cost:
   --cost FLOAT           GPU cost in USD/hr (auto-detected for known GPUs)
@@ -405,6 +421,30 @@ AI Analyst Report:
   --report-model NAME    Report model (Claude defaults to claude-opus-4-8)
   --report-max-tokens N  Generation budget (default: 8000)
 ```
+
+---
+
+## GitHub Action
+
+The repository ships a composite action (`action.yml`) that installs the suite, runs a preset against a server reachable from the runner, uploads the `benchmark-results/` directory as an artifact and exposes the score, grade, peak throughput and results path as outputs. It can also fail the job on major regressions against a stored baseline.
+
+```yaml
+- uses: notadestroyer/vllm-benchmark-suite@main
+  with:
+    vllm-url: http://localhost:8000
+    preset: quick                       # quick | standard | thorough
+    compare-with: baseline/benchmark.json   # optional regression baseline
+    fail-on-regression: "true"
+- run: echo "Score ${{ steps.bench.outputs.score }} (${{ steps.bench.outputs.grade }})"
+```
+
+Inputs: `vllm-url`, `preset`, `context-lengths`, `concurrency`, `output-tokens`, `prompt-type`, `compare-with`, `fail-on-regression`, `python-version`. Outputs: `score`, `grade`, `peak-throughput`, `results-json`.
+
+---
+
+## Grafana Dashboard
+
+`grafana/dashboard.json` is an importable Grafana dashboard for a Prometheus data source scraping vLLM's `/metrics`. It covers throughput, request latency, TTFT, inter-token latency, concurrent requests, KV-cache usage, prefix-cache hit rate, GPU utilisation / memory / temperature / power, request rate, active LoRA adapters and average prefill / decode time. Import it via *Dashboards → New → Import* and select your Prometheus data source.
 
 ---
 
