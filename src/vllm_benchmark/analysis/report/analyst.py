@@ -232,7 +232,16 @@ def deterministic_report(bundle: dict) -> str:
     if governing and governing.get("confidence"):
         caveats.append(f"Bottleneck confidence: {governing['confidence']}.")
     if quality and quality.get("status"):
-        caveats.append(f"Quality measurement: {quality.get('mode')} ({quality.get('status')}).")
+        detail = ""
+        if quality.get("score") is not None:
+            detail = f", score {quality['score']}/100"
+        elif quality.get("perplexity") is not None:
+            detail = f", perplexity {quality['perplexity']}"
+        elif quality.get("mean_kl") is not None:
+            detail = f", mean KL {quality['mean_kl']}"
+            if quality.get("top1_agreement") is not None:
+                detail += f", top-1 agreement {quality['top1_agreement']}"
+        caveats.append(f"Quality measurement: {quality.get('mode')} ({quality.get('status')}{detail}).")
     if not caveats:
         caveats.append("Confidence levels were not reported for this run.")
     for c in caveats:

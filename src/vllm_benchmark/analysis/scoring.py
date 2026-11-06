@@ -8,7 +8,7 @@ Author: amit
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 
 from vllm_benchmark.config import GPU_BASELINES
 
@@ -26,6 +26,10 @@ class ScoreBreakdown:
     grade: str  # "S", "A", "B", "C", "D", "F"
     gpu_match: str | None = None
     gpu_percentile: int | None = None
+
+    def to_dict(self) -> dict:
+        """Plain-dict form (JSON-serialisable) of the full breakdown."""
+        return asdict(self)
 
 
 class VLLMScore:
