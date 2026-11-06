@@ -35,9 +35,9 @@ Most "my 3090 does X tok/s" posts measure one thing, once, with one concurrent r
 
 ```bash
 # vLLM
-vllm serve Qwen/Qwen2.5-7B-Instruct-AWQ --max-model-len 32768
+vllm serve Qwen/Qwen3-7B-Instruct-AWQ --max-model-len 32768
 # or SGLang (add --enable-metrics so the KV-cache / queue signals are available)
-python -m sglang.launch_server --model-path Qwen/Qwen2.5-7B-Instruct-AWQ --enable-metrics
+python -m sglang.launch_server --model-path Qwen/Qwen3-7B-Instruct-AWQ --enable-metrics
 ```
 
 ### 2. Run a preset
