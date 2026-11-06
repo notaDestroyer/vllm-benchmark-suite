@@ -437,6 +437,30 @@ def classify_cell(
 # Whole-run classification
 # ---------------------------------------------------------------------------
 
+_CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+
+def top_verdict(verdicts: Optional[list[dict]]) -> Optional[dict]:
+    """Pick the governing verdict to headline a run.
+
+    Prefers the highest confidence; among equal confidence the cell with
+    the highest concurrency wins (the most loaded point is the one whose
+    bottleneck actually limits the deployment).  Accepts
+    :meth:`BottleneckVerdict.to_dict` dicts; returns ``None`` for empty
+    input.  This is the single implementation used by the result card,
+    share markdown, HTML report and analyst bundle.
+    """
+    if not verdicts:
+        return None
+
+    def _rank(v: dict) -> tuple:
+        cell = v.get("cell") or ()
+        conc = cell[1] if len(cell) > 1 and isinstance(cell[1], (int, float)) else 0
+        return (_CONFIDENCE_ORDER.get(v.get("confidence"), 3), -conc)
+
+    return min(verdicts, key=_rank)
+
+
 def classify_run(
     results: list[dict],
     profile: Optional[ModelProfile],

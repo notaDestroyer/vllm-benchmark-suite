@@ -19,19 +19,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
+from vllm_benchmark.analysis.bottleneck import top_verdict
+from vllm_benchmark.reports.formatting import na
+
 # ---------------------------------------------------------------------------
 # Extraction helpers (pure, None-safe)
 # ---------------------------------------------------------------------------
-
-def _na(value: Optional[Any], suffix: str = "", fmt: str = "{}") -> str:
-    """Format a value with a suffix, or ``"N/A"`` when missing."""
-    if value is None:
-        return "N/A"
-    try:
-        return f"{fmt.format(value)}{suffix}"
-    except (ValueError, TypeError):
-        return "N/A"
-
 
 def _gpu_label(metadata: dict) -> str:
     """Hardware label for the headline row."""
@@ -61,12 +54,8 @@ def _quant_label(metadata: dict) -> str:
 
 
 def _top_verdict(metadata: dict) -> Optional[dict]:
-    """Pick the most-trustworthy bottleneck verdict (prefer high confidence)."""
-    verdicts = metadata.get("bottlenecks") or []
-    if not verdicts:
-        return None
-    order = {"high": 0, "medium": 1, "low": 2}
-    return min(verdicts, key=lambda v: order.get(v.get("confidence"), 3))
+    """Governing bottleneck verdict for the run (shared implementation)."""
+    return top_verdict(metadata.get("bottlenecks"))
 
 
 def _peak_tps(results: list[dict]) -> Optional[float]:
@@ -116,10 +105,10 @@ def _headline_table(results: list[dict], metadata: dict, score: Any) -> str:
         gpu=_gpu_label(metadata),
         model=_model_label(metadata),
         quant=_quant_label(metadata),
-        peak=_na(_peak_tps(results), "", "{:.0f}"),
-        pptg=f"{_na(pp, '', '{:.0f}')}/{_na(tg, '', '{:.0f}')}",
-        ttft=_na(_best_ttft_ms(results), "ms", "{:.0f}"),
-        mbu=_na(mbu, "", "{:.0%}"),
+        peak=na(_peak_tps(results), "", "{:.0f}"),
+        pptg=f"{na(pp, '', '{:.0f}')}/{na(tg, '', '{:.0f}')}",
+        ttft=na(_best_ttft_ms(results), "ms", "{:.0f}"),
+        mbu=na(mbu, "", "{:.0%}"),
         bn=bottleneck or "N/A",
         score=score_text,
     )

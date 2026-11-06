@@ -18,20 +18,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from vllm_benchmark import __version__
+from vllm_benchmark.analysis.bottleneck import top_verdict
+from vllm_benchmark.reports.formatting import na
 
 if TYPE_CHECKING:
     from vllm_benchmark.analysis.diagnostics import Diagnostic
     from vllm_benchmark.analysis.scoring import ScoreBreakdown
-
-
-def _na(value: object, suffix: str = "", fmt: str = "{}") -> str:
-    """Format a value with a suffix, or ``"N/A"`` when missing."""
-    if value is None:
-        return "N/A"
-    try:
-        return f"{fmt.format(value)}{suffix}"
-    except (ValueError, TypeError):
-        return "N/A"
 
 
 def _esc(value: object) -> str:
@@ -62,7 +54,7 @@ def _model_intel_section(metadata: dict) -> str:
     arch = "MoE" if p.get("is_moe") else "dense" if p.get("is_moe") is not None else "N/A"
 
     def _params(n: object) -> str:
-        return _na(n / 1e9 if isinstance(n, (int, float)) else None, "B", "{:.1f}")
+        return na(n / 1e9 if isinstance(n, (int, float)) else None, "B", "{:.1f}")
 
     rows = [
         ("Model", _esc(p.get("name") or "N/A")),
@@ -71,12 +63,12 @@ def _model_intel_section(metadata: dict) -> str:
         ("Active params", _params(p.get("active_params"))),
         ("Total params", _params(p.get("total_params"))),
         ("Attention", _esc(p.get("attention_type") or "N/A")),
-        ("Layers", _na(p.get("num_layers"))),
-        ("KV bytes/token", _na(p.get("kv_bytes_per_token"))),
+        ("Layers", na(p.get("num_layers"))),
+        ("KV bytes/token", na(p.get("kv_bytes_per_token"))),
         ("Provenance", _esc(f"{p.get('source', 'N/A')} ({p.get('confidence', 'N/A')})")),
     ]
     if p.get("is_moe"):
-        rows.insert(7, ("Experts", f"{_na(p.get('experts_per_tok'))}/{_na(p.get('num_experts'))}"))
+        rows.insert(7, ("Experts", f"{na(p.get('experts_per_tok'))}/{na(p.get('num_experts'))}"))
     body = "".join(f"<tr><td><strong>{k}</strong></td><td>{v}</td></tr>" for k, v in rows)
     return f'<h2>Model Intelligence</h2>\n<div class="card"><table>{body}</table></div>\n'
 
@@ -86,8 +78,7 @@ def _bottleneck_section(metadata: dict) -> str:
     verdicts = metadata.get("bottlenecks") or []
     if not verdicts:
         return ""
-    order = {"high": 0, "medium": 1, "low": 2}
-    top = min(verdicts, key=lambda v: order.get(v.get("confidence"), 3))
+    top = top_verdict(verdicts) or {}
 
     rows = ""
     for v in verdicts:
@@ -96,10 +87,10 @@ def _bottleneck_section(metadata: dict) -> str:
         users = cell[1] if len(cell) > 1 else None
         ctx_label = f"{ctx // 1000}K" if isinstance(ctx, int) and ctx >= 1000 else str(ctx)
         rows += (
-            f"<tr><td>{_esc(ctx_label)}/{_na(users)}</td>"
+            f"<tr><td>{_esc(ctx_label)}/{na(users)}</td>"
             f"<td>{_esc(v.get('primary') or 'unknown')}</td>"
-            f"<td>{_na(v.get('mbu'), '', '{:.0%}')}</td>"
-            f"<td>{_na(v.get('mfu'), '', '{:.0%}')}</td>"
+            f"<td>{na(v.get('mbu'), '', '{:.0%}')}</td>"
+            f"<td>{na(v.get('mfu'), '', '{:.0%}')}</td>"
             f"<td>{_esc(v.get('confidence') or '?')}</td></tr>"
         )
     return (

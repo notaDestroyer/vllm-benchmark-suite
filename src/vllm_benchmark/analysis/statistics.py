@@ -16,6 +16,7 @@ from __future__ import annotations
 from typing import Any
 
 import numpy as np
+from scipy import stats as sp_stats
 
 # ---------------------------------------------------------------------------
 # 1. Confidence Intervals
@@ -53,27 +54,10 @@ def confidence_interval(
     sample_mean = float(np.mean(arr))
     n = len(arr)
 
-    try:
-        from scipy import stats as sp_stats
-
-        se = float(np.std(arr, ddof=1)) / np.sqrt(n)
-        t_crit = sp_stats.t.ppf((1 + confidence) / 2, df=n - 1)
-        margin = t_crit * se
-        return (sample_mean, sample_mean - margin, sample_mean + margin)
-    except ImportError:
-        pass
-
-    # Bootstrap fallback
-    rng = np.random.default_rng(seed=42)
-    n_boot = 10_000
-    boot_means = np.empty(n_boot, dtype=np.float64)
-    for i in range(n_boot):
-        boot_means[i] = np.mean(rng.choice(arr, size=n, replace=True))
-
-    alpha = 1.0 - confidence
-    lower = float(np.percentile(boot_means, 100 * alpha / 2))
-    upper = float(np.percentile(boot_means, 100 * (1 - alpha / 2)))
-    return (sample_mean, lower, upper)
+    se = float(np.std(arr, ddof=1)) / np.sqrt(n)
+    t_crit = float(sp_stats.t.ppf((1 + confidence) / 2, df=n - 1))
+    margin = t_crit * se
+    return (sample_mean, sample_mean - margin, sample_mean + margin)
 
 
 # ---------------------------------------------------------------------------
@@ -214,14 +198,9 @@ def is_statistically_significant(
         }
 
     # --- Welch's t-test ---
-    try:
-        from scipy import stats as sp_stats
-
-        t_stat, p_value = sp_stats.ttest_ind(a, b, equal_var=False)
-        t_stat = float(t_stat)
-        p_value = float(p_value)
-    except ImportError:
-        t_stat, p_value = _welch_ttest(a, b)
+    t_stat, p_value = sp_stats.ttest_ind(a, b, equal_var=False)
+    t_stat = float(t_stat)
+    p_value = float(p_value)
 
     # Final safety net: never surface a nan p-value.
     if not np.isfinite(p_value):
@@ -249,71 +228,6 @@ def is_statistically_significant(
         "t_statistic": t_stat,
         "interpretation": interpretation,
     }
-
-
-def _welch_ttest(
-    a: np.ndarray,
-    b: np.ndarray,
-) -> tuple[float, float]:
-    """Manual Welch's *t*-test when SciPy is unavailable.
-
-    Approximates the two-tailed *p*-value using the Welch--Satterthwaite
-    degrees of freedom and the regularised incomplete beta function
-    implemented via a simple numerical integration.
-
-    Returns:
-        ``(t_statistic, p_value)``
-    """
-    n_a, n_b = len(a), len(b)
-    mean_a, mean_b = float(np.mean(a)), float(np.mean(b))
-    var_a = float(np.var(a, ddof=1))
-    var_b = float(np.var(b, ddof=1))
-
-    se = np.sqrt(var_a / n_a + var_b / n_b)
-    if se == 0:
-        return (0.0, 1.0)
-
-    t_stat = (mean_a - mean_b) / se
-
-    # Welch-Satterthwaite degrees of freedom
-    num = (var_a / n_a + var_b / n_b) ** 2
-    denom = (var_a / n_a) ** 2 / (n_a - 1) + (var_b / n_b) ** 2 / (n_b - 1)
-    df = num / denom if denom > 0 else 1.0
-
-    p_value = _two_tailed_p_from_t(abs(t_stat), df)
-    return (float(t_stat), float(p_value))
-
-
-def _two_tailed_p_from_t(t: float, df: float) -> float:
-    """Approximate two-tailed *p*-value from |t| and degrees of freedom.
-
-    Uses numerical integration of the Student-*t* PDF via the composite
-    Simpson rule.  Accurate to roughly four decimal places for typical
-    benchmark sample sizes.
-    """
-    import math
-
-    def _t_pdf(x: float, nu: float) -> float:
-        coeff = math.gamma((nu + 1) / 2) / (
-            math.sqrt(nu * math.pi) * math.gamma(nu / 2)
-        )
-        return coeff * (1 + x ** 2 / nu) ** (-(nu + 1) / 2)
-
-    # Integrate from |t| to a large upper bound (effectively infinity)
-    upper = max(abs(t) + 50, 100.0)
-    n_steps = 2000
-    a_val = abs(t)
-    h = (upper - a_val) / n_steps
-
-    # Composite Simpson's rule
-    total = _t_pdf(a_val, df) + _t_pdf(upper, df)
-    for i in range(1, n_steps):
-        x = a_val + i * h
-        total += (4 if i % 2 == 1 else 2) * _t_pdf(x, df)
-    one_tail = (h / 3) * total
-
-    p = 2 * one_tail
-    return min(max(p, 0.0), 1.0)
 
 
 # ---------------------------------------------------------------------------
@@ -636,8 +550,6 @@ def bootstrap_ci(
     # Prefer SciPy's vetted BCa implementation when requested and valid.
     if method == "bca":
         try:
-            from scipy import stats as sp_stats
-
             rng = np.random.default_rng(seed)
             res = sp_stats.bootstrap(
                 (arr,),
@@ -677,7 +589,7 @@ def t_ci(
     data: list[float],
     confidence: float = 0.95,
 ) -> tuple[float, float, float]:
-    """Student-*t* confidence interval for the mean (small-*n* fallback).
+    """Student-*t* confidence interval for the mean (small-*n* parametric CI).
 
     Method & assumptions: classical parametric interval using the
     Student-*t* distribution, appropriate when *n* is small and the
@@ -707,14 +619,7 @@ def t_ci(
 
     se = float(np.std(arr, ddof=1)) / np.sqrt(n)
 
-    try:
-        from scipy import stats as sp_stats
-
-        t_crit = float(sp_stats.t.ppf((1 + confidence) / 2, df=n - 1))
-    except ImportError:
-        # Normal approximation when SciPy is unavailable.
-        z = {0.90: 1.6449, 0.95: 1.9600, 0.99: 2.5758}.get(round(confidence, 2), 1.96)
-        t_crit = z
+    t_crit = float(sp_stats.t.ppf((1 + confidence) / 2, df=n - 1))
 
     margin = t_crit * se
     return (point - margin, point, point + margin)
@@ -753,14 +658,9 @@ def mann_whitney_u(a: list[float], b: list[float]) -> dict[str, float]:
     if float(np.ptp(combined)) == 0.0:
         return {"u": float(arr_a.size * arr_b.size / 2.0), "p_value": 1.0}
 
-    try:
-        from scipy import stats as sp_stats
-
-        u_stat, p_value = sp_stats.mannwhitneyu(arr_a, arr_b, alternative="two-sided")
-        u_stat = float(u_stat)
-        p_value = float(p_value)
-    except ImportError:  # pragma: no cover - SciPy is a hard dependency here
-        u_stat, p_value = 0.0, 1.0
+    u_stat, p_value = sp_stats.mannwhitneyu(arr_a, arr_b, alternative="two-sided")
+    u_stat = float(u_stat)
+    p_value = float(p_value)
 
     if not np.isfinite(p_value):
         p_value = 1.0
@@ -934,12 +834,7 @@ def wilson_interval(
     if n <= 0:
         return (0.0, 0.0, 0.0)
 
-    try:
-        from scipy import stats as sp_stats
-
-        z = float(sp_stats.norm.ppf((1 + confidence) / 2))
-    except ImportError:
-        z = {0.90: 1.6449, 0.95: 1.9600, 0.99: 2.5758}.get(round(confidence, 2), 1.96)
+    z = float(sp_stats.norm.ppf((1 + confidence) / 2))
 
     p_hat = successes / n
     z2 = z * z
@@ -950,6 +845,41 @@ def wilson_interval(
     low = max(0.0, center - margin)
     high = min(1.0, center + margin)
     return (float(low), float(p_hat), float(high))
+
+
+# ---------------------------------------------------------------------------
+# 10b. Interval helpers shared by the A/B comparison modules
+# ---------------------------------------------------------------------------
+
+
+def point_ci(values: list[float]) -> tuple[float, float, float]:
+    """Return a degenerate ``(low, point, high)`` for 0/1-length samples.
+
+    Used where a bootstrap interval is impossible (fewer than two values);
+    the empty case is ``(0.0, 0.0, 0.0)`` which :func:`cis_overlap` treats
+    as non-informative.
+    """
+    if not values:
+        return (0.0, 0.0, 0.0)
+    v = float(values[0])
+    return (v, v, v)
+
+
+def cis_overlap(
+    ci_a: tuple[float, float, float],
+    ci_b: tuple[float, float, float],
+) -> bool:
+    """Whether two ``(low, point, high)`` intervals overlap.
+
+    Empty/degenerate intervals (all zeros) are treated as non-informative
+    and therefore *do* overlap (forcing a tie), so a winner is never
+    claimed without real interval evidence.
+    """
+    low_a, _, high_a = ci_a
+    low_b, _, high_b = ci_b
+    if (low_a, high_a) == (0.0, 0.0) or (low_b, high_b) == (0.0, 0.0):
+        return True
+    return not (high_a < low_b or high_b < low_a)
 
 
 # ---------------------------------------------------------------------------

@@ -40,8 +40,10 @@ from typing import Any, Optional
 
 from vllm_benchmark.analysis.statistics import (
     bootstrap_ci,
+    cis_overlap,
     compare_groups,
     holm_adjusted_p,
+    point_ci,
 )
 
 #: Metrics compared per cell.  ``higher_is_better`` orients the winner.
@@ -192,8 +194,8 @@ def head_to_head(
             a_vals = _metric_sample(cell_a, metric)
             b_vals = _metric_sample(cell_b, metric)
             cmp = compare_groups(a_vals, b_vals)
-            ci_a = bootstrap_ci(a_vals, seed=0) if len(a_vals) > 1 else _point_ci(a_vals)
-            ci_b = bootstrap_ci(b_vals, seed=0) if len(b_vals) > 1 else _point_ci(b_vals)
+            ci_a = bootstrap_ci(a_vals, seed=0) if len(a_vals) > 1 else point_ci(a_vals)
+            ci_b = bootstrap_ci(b_vals, seed=0) if len(b_vals) > 1 else point_ci(b_vals)
             raw.append({
                 "cell": key,
                 "metric": metric,
@@ -221,8 +223,8 @@ def head_to_head(
         cmp = entry["compare"]
         ci_a = entry["ci_a"]
         ci_b = entry["ci_b"]
-        cis_overlap = _cis_overlap(ci_a, ci_b)
-        real = bool(cmp["real_difference"]) and adj_p < 0.05 and not cis_overlap
+        overlap = cis_overlap(ci_a, ci_b)
+        real = bool(cmp["real_difference"]) and adj_p < 0.05 and not overlap
         tie = not real
 
         winner: Optional[str] = None
@@ -265,32 +267,3 @@ def head_to_head(
         "n_matched_cells": len(matched_keys),
         "n_comparisons": len(raw),
     }
-
-
-# ---------------------------------------------------------------------------
-# Small numeric helpers (pure)
-# ---------------------------------------------------------------------------
-
-def _point_ci(values: list[float]) -> tuple[float, float, float]:
-    """Return a degenerate ``(low, point, high)`` for 0/1-length samples."""
-    if not values:
-        return (0.0, 0.0, 0.0)
-    v = float(values[0])
-    return (v, v, v)
-
-
-def _cis_overlap(
-    ci_a: tuple[float, float, float],
-    ci_b: tuple[float, float, float],
-) -> bool:
-    """Whether two ``(low, point, high)`` intervals overlap.
-
-    Empty/degenerate intervals (all zeros) are treated as non-informative
-    and therefore *do* overlap (forcing a tie), so a winner is never
-    claimed without real interval evidence.
-    """
-    low_a, _, high_a = ci_a
-    low_b, _, high_b = ci_b
-    if (low_a, high_a) == (0.0, 0.0) or (low_b, high_b) == (0.0, 0.0):
-        return True
-    return not (high_a < low_b or high_b < low_a)

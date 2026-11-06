@@ -22,6 +22,8 @@ from typing import Any, Optional
 
 import matplotlib
 
+from vllm_benchmark.analysis.bottleneck import top_verdict
+
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
@@ -104,12 +106,8 @@ def _params_label(model_profile: Optional[dict]) -> str:
 
 
 def _top_verdict(metadata: dict) -> Optional[dict]:
-    """Pick the most-trustworthy bottleneck verdict (prefer high confidence)."""
-    verdicts = metadata.get("bottlenecks") or []
-    if not verdicts:
-        return None
-    order = {"high": 0, "medium": 1, "low": 2}
-    return min(verdicts, key=lambda v: order.get(v.get("confidence"), 3))
+    """Governing bottleneck verdict for the run (shared implementation)."""
+    return top_verdict(metadata.get("bottlenecks"))
 
 
 def _headline_throughput(results: list[dict]) -> tuple[Optional[float], Optional[float]]:

@@ -28,6 +28,8 @@ import json
 import re
 from typing import Any, Optional
 
+from vllm_benchmark.analysis.bottleneck import top_verdict
+
 #: Maximum length for any sanitized server-derived string.
 _MAX_STR_LEN = 200
 
@@ -177,10 +179,9 @@ def _summarize_model_profile(profile: Optional[dict]) -> Optional[dict]:
 def _summarize_bottlenecks(bottlenecks: Optional[list[dict]]) -> dict:
     """Carry the bottleneck verdicts (governing + per-cell facts)."""
     verdicts = bottlenecks or []
-    order = {"high": 0, "medium": 1, "low": 2}
     governing: Optional[dict] = None
-    if verdicts:
-        top = min(verdicts, key=lambda v: order.get(v.get("confidence"), 3))
+    top = top_verdict(verdicts)
+    if top is not None:
         governing = {
             "primary": top.get("primary"),
             "lever": sanitize_text(top.get("lever"), max_len=300),
