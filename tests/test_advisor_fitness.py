@@ -12,6 +12,7 @@ from __future__ import annotations
 
 from vllm_benchmark.analysis.advisor import build_advisory
 from vllm_benchmark.analysis.fitness import (
+    FitnessGrade,
     assess_fitness,
     fitness_verdict,
 )
@@ -353,3 +354,41 @@ def test_build_advisory_with_workload_metrics():
     profiles = advisory.fitness["profiles"]
     assert profiles["structured_output_fc"]["grade"] == "Good"
     assert profiles["embeddings_rerank"]["grade"] == "Good"
+
+
+
+# ---------------------------------------------------------------------------
+# Verdict never names the same profile as best and worst
+# ---------------------------------------------------------------------------
+
+
+def _g(profile: str, grade: str, limiting: str | None = None) -> FitnessGrade:
+    return FitnessGrade(profile=profile, grade=grade, limiting_factor=limiting, detail="", confidence="medium")
+
+
+def test_verdict_single_graded_profile_has_no_avoid_half():
+    grades = {"interactive_chat": _g("interactive_chat", "Good"),
+              "batch_offline": _g("batch_offline", "N/A")}
+    v = fitness_verdict(grades)
+    assert v.startswith("Best for: interactive chat (Good)")
+    assert "avoid for" not in v
+    assert v.count("interactive chat") == 1
+
+
+def test_verdict_all_same_grade_has_no_avoid_half():
+    grades = {"interactive_chat": _g("interactive_chat", "Good"),
+              "batch_offline": _g("batch_offline", "Good")}
+    v = fitness_verdict(grades)
+    assert "avoid for" not in v
+    assert "all graded profiles are good" in v
+
+
+def test_verdict_distinct_best_and_worst_unchanged():
+    grades = {"interactive_chat": _g("interactive_chat", "Good"),
+              "batch_offline": _g("batch_offline", "Poor", "throughput")}
+    v = fitness_verdict(grades)
+    assert v == "Best for: interactive chat; avoid for: batch / offline throughput (limited by throughput)."
+
+
+def test_verdict_no_graded_profiles():
+    assert "insufficient data" in fitness_verdict({"x": _g("x", "N/A")})
