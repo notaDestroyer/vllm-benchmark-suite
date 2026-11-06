@@ -16,6 +16,19 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 
+def _is_num(value: object) -> bool:
+    """True for finite int/float values (not bool, not None)."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _first_present(mapping: Dict, *keys: str):
+    """Return the first non-``None`` value among ``keys`` in ``mapping``."""
+    for key in keys:
+        if mapping.get(key) is not None:
+            return mapping.get(key)
+    return None
+
+
 def create_result_entry(
     results: List[Dict],
     metadata: Dict,
@@ -40,8 +53,11 @@ def create_result_entry(
         return {}
 
     peak_tps = max(r["tokens_per_second"] for r in successful)
-    best_latency = min(r["avg_latency"] for r in successful)
-    best_ttft = min(r.get("ttft_estimate", 999) for r in successful)
+    latencies = [r["avg_latency"] for r in successful if _is_num(r.get("avg_latency"))]
+    best_latency = min(latencies) if latencies else None
+    # ttft_estimate may be absent (embeddings) or None (non-streaming runs).
+    ttfts = [r["ttft_estimate"] for r in successful if _is_num(r.get("ttft_estimate"))]
+    best_ttft = min(ttfts) if ttfts else None
 
     # Cost if available
     costs = [r["cost_per_1m_tokens"] for r in successful if r.get("cost_per_1m_tokens")]
@@ -60,12 +76,16 @@ def create_result_entry(
             "model": server.get("model_name", "Unknown"),
             "vllm_version": server.get("version"),
             "quantization": server.get("quantization"),
-            "tensor_parallel": server.get("tensor_parallel_size"),
+            # ServerInfo.to_dict() emits ``tensor_parallel``; older result
+            # files used ``tensor_parallel_size``.  Accept both.
+            "tensor_parallel": _first_present(server, "tensor_parallel", "tensor_parallel_size"),
+            "pipeline_parallel": server.get("pipeline_parallel"),
+            "backend": server.get("backend"),
         },
         "results": {
             "peak_throughput_tps": round(peak_tps, 1),
-            "best_latency_s": round(best_latency, 3),
-            "best_ttft_ms": round(best_ttft * 1000, 1),
+            "best_latency_s": round(best_latency, 3) if best_latency is not None else None,
+            "best_ttft_ms": round(best_ttft * 1000, 1) if best_ttft is not None else None,
             "cost_per_1m_tokens_usd": round(best_cost, 4) if best_cost else None,
         },
         "test_matrix": {
@@ -124,14 +144,15 @@ def format_leaderboard_row(entry: Dict) -> str:
     model = sw.get("model", "?")
     if len(model) > 30:
         model = model[:27] + "..."
-    tps = res.get("peak_throughput_tps", 0)
-    ttft = res.get("best_ttft_ms", 0)
+    tps = res.get("peak_throughput_tps") or 0
+    ttft = res.get("best_ttft_ms")
+    ttft_str = f"{ttft:.0f}ms" if _is_num(ttft) else "N/A"
     cost = res.get("cost_per_1m_tokens_usd")
     cost_str = f"${cost:.4f}" if cost else "N/A"
     grade = sc.get("grade", "-")
-    overall = sc.get("overall", 0)
+    overall = sc.get("overall") or 0
 
-    return f"| {gpu} | {model} | {tps:,.0f} | {ttft:.0f}ms | {cost_str} | {grade} ({overall:,}) |"
+    return f"| {gpu} | {model} | {tps:,.0f} | {ttft_str} | {cost_str} | {grade} ({overall:,}) |"
 
 
 def generate_leaderboard_md(results_dir: str = "./outputs") -> str:
@@ -166,7 +187,7 @@ def generate_leaderboard_md(results_dir: str = "./outputs") -> str:
         lines.append(format_leaderboard_row(entry))
 
     lines.append("")
-    lines.append(f"*Generated {datetime.now().strftime('%Y-%m-%d %H:%M')} UTC*")
+    lines.append(f"*Generated {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M')} UTC*")
     lines.append("")
 
     return "\n".join(lines)
