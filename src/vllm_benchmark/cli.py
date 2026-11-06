@@ -472,8 +472,9 @@ def _write_analysis_charts(
     bottlenecks: list[dict],
     output_dir: str,
     timestamp: str,
+    capacity: dict | None = None,
 ) -> list[str]:
-    """Render the roofline and bottleneck-map PNGs next to the main chart.
+    """Render the roofline, bottleneck-map and capacity PNGs next to the main chart.
 
     Each chart is skipped (never fatal) when its inputs are absent or the
     renderer raises.  Returns the list of paths written.
@@ -492,6 +493,12 @@ def _write_analysis_charts(
             written.append(plot_bottleneck_map(bottlenecks, str(out / f"bottleneck_map_{timestamp}.png")))
         except Exception as exc:
             console.print(f"  [yellow]Bottleneck map skipped:[/yellow] {exc}")
+    if capacity:
+        try:
+            from vllm_benchmark.reports.capacity_chart import plot_capacity
+            written.append(plot_capacity(capacity, str(out / f"capacity_{timestamp}.png")))
+        except Exception as exc:
+            console.print(f"  [yellow]Capacity chart skipped:[/yellow] {exc}")
     return written
 
 
@@ -830,6 +837,37 @@ def main():
         )
         sys.exit(0)
 
+    # ---- Pre-run capacity check (fit the matrix before spending time on it) ----
+    prelim_profile = None
+    prelim_gpu_spec = None
+    try:
+        from vllm_benchmark.analysis.capacity import analyze_capacity as _analyze_capacity
+        from vllm_benchmark.analysis.model_intel import build_profile as _build_profile
+        from vllm_benchmark.analysis.model_intel import resolve_gpu_spec as _resolve_gpu_spec
+
+        prelim_profile = _build_profile(backend_server_info)
+        prelim_gpu_spec = _resolve_gpu_spec(system_info.get("gpu_name"), config.gpu_spec_mode)
+        pre = _analyze_capacity(
+            None, prelim_profile, prelim_gpu_spec, backend_server_info, system_info,
+            context_lengths=config.context_lengths, concurrency_levels=config.concurrency_levels,
+            output_tokens=config.output_tokens,
+        )
+        fp = pre["footprint"]
+        if fp.get("kv_capacity_tokens"):
+            console.print(f"  KV capacity: {fp['kv_capacity_tokens']:,} tokens ({fp['kv_capacity_source']}); "
+                          f"weights {fp['weight_bytes_total'] / 1e9:.1f} GB ({fp.get('quantization')})"
+                          if fp.get("weight_bytes_total") else
+                          f"  KV capacity: {fp['kv_capacity_tokens']:,} tokens ({fp['kv_capacity_source']})")
+        over = (pre.get("matrix_fit") or {}).get("cells_over_capacity") or []
+        if over:
+            cells = ", ".join(f"{c['context_length'] // 1000}K x {c['concurrent_users']}u (max {c['max_users']})" for c in over)
+            console.print(f"[yellow]  Warning: these cells exceed the KV cache and will queue or preempt: {cells}[/yellow]")
+        if fp.get("fits_on_one_gpu") is False:
+            console.print("[red]  Warning: the model's weights do not fit in one GPU's usable memory at the configured "
+                          "utilisation; expect failures unless the server shards it (TP/PP).[/red]")
+    except Exception as exc:  # never fatal
+        console.print(f"[dim]Pre-run capacity check skipped: {exc}[/dim]")
+
     # ---- Warmup ----
     if config.warmup:
         if not warmup_model(config, model_name):
@@ -979,8 +1017,8 @@ def main():
             resolve_gpu_spec,
         )
 
-        profile = build_profile(backend_server_info)
-        gpu_spec = resolve_gpu_spec(system_info.get("gpu_name"), config.gpu_spec_mode)
+        profile = prelim_profile or build_profile(backend_server_info)
+        gpu_spec = prelim_gpu_spec or resolve_gpu_spec(system_info.get("gpu_name"), config.gpu_spec_mode)
         model_profile_dict = profile.to_dict()
         if gpu_spec:
             system_info["gpu_spec"] = gpu_spec
@@ -1015,6 +1053,19 @@ def main():
             mbu=run_mbu, mfu=run_mfu,
         )
         advisory_dict = advisory.to_dict()
+
+        # Capacity, roofline ceilings, what-ifs, operating point, power truth.
+        try:
+            from vllm_benchmark.analysis.capacity import analyze_capacity
+            top_users = ((advisory_dict.get("throughput_optimal") or {}).get("concurrent_users"))
+            advisory_dict["capacity"] = analyze_capacity(
+                reporting_results, profile, gpu_spec, backend_server_info, system_info,
+                context_lengths=config.context_lengths, concurrency_levels=config.concurrency_levels,
+                output_tokens=config.output_tokens, bottlenecks=bottleneck_dicts, environment=environment,
+                throughput_optimal_users=int(top_users) if top_users else None,
+            )
+        except Exception as exc:  # never fatal
+            console.print(f"[dim]Capacity analysis skipped: {exc}[/dim]")
 
         # Optional empirical critical-batch sweep.
         if config.bottleneck_sweep:
@@ -1208,15 +1259,22 @@ def main():
         console.print(render_bottleneck_panel(bottleneck_dicts))
     if advisory_dict and advisory_dict.get("fitness"):
         console.print(render_fitness_panel(advisory_dict["fitness"]))
+    if advisory_dict and advisory_dict.get("capacity"):
+        from vllm_benchmark.reports.terminal import render_capacity_panel
+        console.print(render_capacity_panel(advisory_dict["capacity"]))
 
     # ---- Charts ----
     if config.generate_charts:
         console.print("\n[yellow]Generating charts...[/yellow]")
         from vllm_benchmark.reports.charts import visualize_results
-        viz_file = visualize_results(reporting_results, model_name, system_info, server_info, config.output_tokens, config.output_dir)
-        console.print(f"  [green]Charts:[/green] {viz_file}")
+        try:
+            viz_file = visualize_results(reporting_results, model_name, system_info, server_info, config.output_tokens, config.output_dir)
+            console.print(f"  [green]Charts:[/green] {viz_file}")
+        except Exception as exc:  # charts must never break the run
+            console.print(f"  [yellow]Main chart skipped:[/yellow] {exc}")
         for extra in _write_analysis_charts(
             reporting_results, model_profile_dict, gpu_spec, bottleneck_dicts, config.output_dir, timestamp,
+            capacity=(advisory_dict or {}).get("capacity"),
         ):
             console.print(f"  [green]Chart:[/green]  {extra}")
 

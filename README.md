@@ -99,7 +99,43 @@ How to read it:
 - **MBU** is the fraction of the GPU's HBM bandwidth you are using during single-user decode. On a consumer card at batch 1 this is the number that matters: 60 to 80 percent is about as good as it gets. **MFU** is the fraction of peak FLOPs during prefill; it is a ±15 percent estimate, not a billing figure.
 - **The score** is a 0 to 10,000 composite against a per-GPU baseline (H100, A100, L40S, RTX 4090/5090, RTX 6000 Ada, RTX PRO 6000). Grades: S at 9000, A at 7500, B at 6000, C at 4500, D at 3000, F below. Energy scores default to the midpoint when there is no nvidia-smi telemetry, so a CPU-only client machine gets a neutral energy score, not a penalty.
 
-Everything also lands in `./outputs/`: `benchmark_*.json` (all numbers, plus `model_profile`, `bottlenecks`, `advisory`, `quality`), a CSV, PNG charts including the roofline and a context × concurrency bottleneck map, and an interactive HTML report.
+Below that comes the **Capacity & Ceilings** panel, which is where "how do I get the most out of this model on this card" is answered with numbers instead of tips:
+
+```
+╭──────────────────────────── Capacity & Ceilings ─────────────────────────────╮
+│ Weights         8.0 GB (FP8, 1.0 B/param)                                    │
+│ KV bytes/token  131,072                                                      │
+│ KV capacity     441,344 tokens (server)                                      │
+│ GPU memory      102.6 GB x 1 @ 90% utilisation                               │
+│ Max users by context  32K: 13, 128K: 3                                       │
+│ Over capacity   32K x 16u, 128K x 4u, 128K x 8u                              │
+│                                                                              │
+│  Cell   Decode ceiling  Measured  Attained  Bound      Prefill ceiling  MFU  │
+│  32K/1      147 tok/s    112 tok/s    76%   bandwidth     62,740 tok/s  31%  │
+│  32K/4      530 tok/s    402 tok/s    76%   bandwidth     62,740 tok/s  29%  │
+│  32K/16   1,560 tok/s    980 tok/s    63%   bandwidth     62,740 tok/s  27%  │
+│                                                                              │
+│ Operating point: Gains flatten at 8 users (32K), well below the hardware     │
+│   critical batch (~280): the limit is the server (KV capacity, queueing).    │
+│ Power: Power-limited: ran at 74% of max SM clock, power-capped 91% of the    │
+│   time at 300 W. A higher power limit (or the 600 W variant) is the lever.   │
+│ What-if: NVFP4 would raise the single-stream ceiling to 254 tok/s and KV     │
+│   room to ~650,000 tokens (needs Blackwell; FP4 tensor cores).               │
+│ Suggested serve command (KV capacity 441,344 tokens (server); ...):          │
+│ vllm serve meta-llama/Llama-3-8B --max-model-len 128500 ...                  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+```
+
+- **KV capacity** is the number of tokens the server's KV cache holds. On vLLM it is read from the server itself (`cache_config_info`), on SGLang from `max_total_num_tokens`; elsewhere it is estimated from GPU memory. It sets **max users by context** and flags matrix cells that cannot fit before you wait for them to fail. The same check runs *before* the benchmark starts.
+- **Decode ceiling** is the roofline limit for this model on this card at that concurrency: `N × bandwidth / (weights + N × KV bytes × context)`, capped by compute. **Attained** is what you got as a fraction of it. 60 to 80 percent at batch 1 is normal; a gap that grows with concurrency points at the server.
+- **Operating point** compares the measured knee of the throughput curve with the hardware's critical batch, so it can say whether the GPU ran out of compute or the server ran out of something else.
+- **Power** reads the sustained SM clock, the enforced power limit and the throttle reasons while the cells ran. A 300 W Max-Q card is told apart from a 600 W one here, not guessed from the name.
+- **What-if** projects weights, KV room and the single-stream ceiling for BF16, FP8, INT4 and NVFP4 (and FP8 KV cache) on *this* card, marking formats the card cannot run.
+- **Suggested serve command** is sized from those numbers: `--max-model-len` from the KV budget, `--max-num-seqs` from the users that fit at the largest context, never below the measured sweet spot.
+
+The formulas and their sources are in the [reference](docs/reference.md#capacity-and-ceilings).
+
+Everything also lands in `./outputs/`: `benchmark_*.json` (all numbers, plus `model_profile`, `bottlenecks`, `advisory` with its `capacity` section, `quality`), a CSV, PNG charts including the roofline, a context × concurrency bottleneck map and the capacity figure (measured vs ceiling by concurrency, context slope, what-if by format), and an interactive HTML report.
 
 ---
 
@@ -149,7 +185,7 @@ One JSON object per line with a `"prompt"` key. Prompts are cycled across reques
 
 ### "How much context can I actually fit?"
 
-The model profile prints KV bytes per token and estimated weight memory for the detected quant. The bottleneck map shows where cells flip to `kv_capacity` (the server's own KV-cache usage hit 95 percent, or it started preempting). Run `--bottleneck-sweep` to measure the critical batch size on your hardware instead of trusting the analytic estimate.
+The Capacity panel answers it directly: KV capacity in tokens (read from the server when it publishes it), max users at each context, and which matrix cells are over capacity. The bottleneck map shows where cells flip to `kv_capacity` (the server's own KV-cache usage hit 95 percent, or it started preempting). Run `--bottleneck-sweep` to measure the critical batch size on your hardware instead of trusting the analytic estimate.
 
 ### "Did my config change make it worse?"
 

@@ -3,6 +3,30 @@
 ## Unreleased
 
 ### Added
+- **Capacity & Ceilings analysis** (`advisory.capacity`, terminal panel, HTML
+  section, share lines, `capacity_*.png`, analyst-bundle facts): weights and KV
+  footprint for the served quant; KV capacity in tokens read from the server
+  (vLLM `cache_config_info`, SGLang `max_total_num_tokens`) or estimated from
+  GPU memory; max users per context and matrix cells over capacity, checked
+  before the run starts; roofline decode ceiling per cell
+  (`N × BW / (W + N × KV × L)` capped by compute) with attainment and binding
+  limit; prefill ceiling / MFU per cell; context slope with KV share of bytes;
+  quant what-ifs (BF16 / FP8 / INT4 / NVFP4 / FP8 KV) on this GPU; operating
+  point (measured knee vs critical batch); power truth (sustained clock, power
+  cap and thermal throttle fractions, enforced limit); replicas-vs-TP advice
+  for multi-GPU hosts; a sized `vllm serve` / SGLang command. Formulas and
+  references (Williams et al. 2009; Pope et al. 2022; Kaplan et al. 2020;
+  Databricks 2023) are recorded in `method`.
+- nvidia-smi poller now samples `clocks.max.sm`, `power.limit` and
+  `clocks_throttle_reasons.active`; cells carry `sustained_clock_pct`,
+  `power_limit_w`, `power_cap_frac`, `thermal_frac`.
+- SGLang server info carries `kv_capacity_tokens`, `gpu_memory_utilization`
+  (mem_fraction_static) and `kv_cache_dtype`.
+
+### Fixed
+- Chart generation crashed on matplotlib ≥ 3.9 (`boxplot(labels=)` renamed to
+  `tick_labels=`), aborting the run after the JSON was written; the main chart is
+  now guarded like the others and covered by a test.
 - **Device-derived GPU specs** — on an NVIDIA host the roofline bandwidth and
   dense BF16/FP8/FP4 peaks are computed from the card's own CUDA core count,
   clocks, bus width and compute capability via NVML (`nvidia-ml-py`, now a

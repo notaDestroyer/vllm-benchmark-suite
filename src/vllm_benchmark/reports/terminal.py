@@ -328,3 +328,87 @@ def create_live_dashboard(
         layout["remaining"].update(Panel("Final test running", title="Queue", border_style="green"))
 
     return layout
+
+
+def _gb(n: Optional[float]) -> str:
+    return "N/A" if not n else f"{n / 1e9:.1f} GB"
+
+
+def render_capacity_panel(capacity: Optional[Dict]) -> Panel:
+    """Render the capacity / ceilings / what-if panel.
+
+    Args:
+        capacity: ``analyze_capacity()`` output (or ``None``).
+    """
+    if not capacity:
+        return Panel("No capacity analysis available.", title="[bold]Capacity & Ceilings[/bold]", border_style="magenta")
+    fp = capacity.get("footprint") or {}
+    body = Table.grid(padding=(0, 2))
+    body.add_column(style="cyan bold")
+    body.add_column(style="yellow")
+    q = fp.get("quantization") or "unknown"
+    body.add_row("Weights", f"{_gb(fp.get('weight_bytes_total'))} ({q}, {fp.get('bytes_per_param')} B/param)")
+    body.add_row("KV bytes/token", na(fp.get("kv_bytes_per_token"), "", "{:,}"))
+    cap = fp.get("kv_capacity_tokens")
+    body.add_row("KV capacity", f"{cap:,} tokens ({fp.get('kv_capacity_source')})" if cap else "unknown")
+    mem = fp.get("gpu_memory_bytes")
+    if mem:
+        body.add_row("GPU memory", f"{_gb(mem)} x {fp.get('tensor_parallel', 1) * fp.get('pipeline_parallel', 1)} "
+                                   f"@ {fp.get('gpu_memory_utilization'):.0%} utilisation")
+    fit = capacity.get("matrix_fit") or {}
+    if fit.get("known"):
+        mu = fit.get("max_users_by_context") or {}
+        body.add_row("Max users by context", ", ".join(f"{int(c) // 1000}K: {u}" for c, u in sorted(mu.items(), key=lambda kv: int(kv[0]))))
+        over = fit.get("cells_over_capacity") or []
+        if over:
+            body.add_row("[red]Over capacity[/red]", ", ".join(f"{c['context_length'] // 1000}K x {c['concurrent_users']}u" for c in over))
+
+    ceilings = capacity.get("ceilings") or []
+    table = None
+    if ceilings:
+        table = Table(show_header=True, header_style="bold magenta", box=box.SIMPLE_HEAVY, pad_edge=False)
+        for col in ("Cell (ctx/users)", "Decode ceiling", "Measured", "Attained", "Bound", "Prefill ceiling", "Prefill MFU"):
+            table.add_column(col, justify="right" if col != "Cell (ctx/users)" else "left")
+        for c in ceilings:
+            table.add_row(
+                f"{c['context_length'] // 1000}K/{c['concurrent_users']}",
+                na(c.get("decode_ceiling_tps"), " tok/s", "{:,.0f}"),
+                na(c.get("decode_measured_tps"), " tok/s", "{:,.0f}"),
+                na(c.get("decode_attainment"), "", "{:.0%}"),
+                str(c.get("bound_by") or "?"),
+                na(c.get("prefill_ceiling_tps"), " tok/s", "{:,.0f}"),
+                na(c.get("prefill_attainment"), "", "{:.0%}"),
+            )
+
+    lines: List[str] = []
+    spot = (capacity.get("sweet_spot") or {}).get("verdict")
+    if spot:
+        lines.append(f"[bold]Operating point:[/bold] {spot}")
+    power = (capacity.get("power") or {}).get("verdict")
+    if power:
+        lines.append(f"[bold]Power:[/bold] {power}")
+    mg = (capacity.get("multi_gpu") or {}).get("recommendation")
+    if mg:
+        lines.append(f"[bold]Multi-GPU:[/bold] {mg}")
+    what_if = [w for w in (capacity.get("what_if") or []) if w.get("supported") and not w.get("current")]
+    if what_if:
+        best = max(what_if, key=lambda w: w.get("single_stream_ceiling_tps") or 0)
+        if best.get("single_stream_ceiling_tps"):
+            lines.append(f"[bold]What-if:[/bold] {best['format']} would raise the single-stream ceiling to "
+                         f"{best['single_stream_ceiling_tps']:,.0f} tok/s"
+                         + (f" and KV room to ~{best['kv_capacity_tokens_est']:,} tokens" if best.get("kv_capacity_tokens_est") else "")
+                         + f" ({best.get('note')}).")
+    cmd = (capacity.get("server_command") or {}).get("command")
+    if cmd:
+        lines.append(f"[bold]Suggested serve command[/bold] ({(capacity.get('server_command') or {}).get('basis')}):\n{cmd}")
+    for n in capacity.get("notes") or []:
+        lines.append(f"[dim]{n}[/dim]")
+
+    from rich.console import Group
+    parts: list = [body]
+    if table is not None:
+        parts.append(table)
+    if lines:
+        parts.append(Text.from_markup("\n".join(lines)))
+    return Panel(Group(*parts), title="[bold]Capacity & Ceilings[/bold]", border_style="magenta")
+

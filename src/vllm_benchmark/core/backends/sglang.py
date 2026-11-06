@@ -74,6 +74,12 @@ class SGLangBackend(OpenAICompatBackend):
                     info.max_num_seqs = server_data["max_running_requests"]
                 if server_data.get("attention_backend") is not None:
                     info.raw["attention_backend"] = server_data["attention_backend"]
+                if server_data.get("max_total_num_tokens") is not None:
+                    info.raw["kv_capacity_tokens"] = server_data["max_total_num_tokens"]
+                if server_data.get("mem_fraction_static") is not None:
+                    info.raw["gpu_memory_utilization"] = server_data["mem_fraction_static"]
+                if server_data.get("kv_cache_dtype") is not None:
+                    info.kv_cache_dtype = str(server_data["kv_cache_dtype"])
                 if server_data.get("version"):
                     info.backend_version = server_data["version"]
 

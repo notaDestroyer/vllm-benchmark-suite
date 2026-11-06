@@ -128,6 +128,54 @@ def _fitness_section(metadata: dict) -> str:
     )
 
 
+def _capacity_section(metadata: dict) -> str:
+    """Build the capacity / ceilings HTML section (empty when none)."""
+    cap = (metadata.get("advisory") or {}).get("capacity") or {}
+    if not cap:
+        return ""
+    fp = cap.get("footprint") or {}
+
+    def _gb(n: object) -> str:
+        return na(n / 1e9 if isinstance(n, (int, float)) else None, " GB", "{:.1f}")
+
+    rows = [
+        ("Weights", f"{_gb(fp.get('weight_bytes_total'))} ({_esc(fp.get('quantization') or 'unknown')})"),
+        ("KV bytes / token", na(fp.get("kv_bytes_per_token"), "", "{:,}")),
+        ("KV capacity", (f"{fp['kv_capacity_tokens']:,} tokens ({_esc(fp.get('kv_capacity_source'))})"
+                         if fp.get("kv_capacity_tokens") else "unknown")),
+        ("GPU memory", _gb(fp.get("gpu_memory_bytes"))),
+    ]
+    body = "".join(f"<tr><td><strong>{k}</strong></td><td>{v}</td></tr>" for k, v in rows)
+    cells = ""
+    for c in cap.get("ceilings") or []:
+        cells += (
+            f"<tr><td>{c['context_length'] // 1000}K/{c['concurrent_users']}</td>"
+            f"<td>{na(c.get('decode_ceiling_tps'), '', '{:,.0f}')}</td>"
+            f"<td>{na(c.get('decode_measured_tps'), '', '{:,.0f}')}</td>"
+            f"<td>{na(c.get('decode_attainment'), '', '{:.0%}')}</td>"
+            f"<td>{_esc(c.get('bound_by') or '?')}</td>"
+            f"<td>{na(c.get('prefill_attainment'), '', '{:.0%}')}</td></tr>"
+        )
+    table = ("<table><thead><tr><th>Cell</th><th>Decode ceiling</th><th>Measured</th><th>Attained</th>"
+             f"<th>Bound</th><th>Prefill MFU</th></tr></thead><tbody>{cells}</tbody></table>") if cells else ""
+    verdicts = ""
+    for label, key in (("Operating point", "sweet_spot"), ("Power", "power"), ("Multi-GPU", "multi_gpu")):
+        v = (cap.get(key) or {}).get("verdict") or (cap.get(key) or {}).get("recommendation")
+        if v:
+            verdicts += f"<p><strong>{label}:</strong> {_esc(v)}</p>"
+    cmd = (cap.get("server_command") or {}).get("command")
+    cmd_html = f"<p><strong>Suggested serve command</strong></p><pre>{_esc(cmd)}</pre>" if cmd else ""
+    method = cap.get("method") or {}
+    refs = "".join(f"<li>{_esc(r)}</li>" for r in method.get("references") or [])
+    method_html = (f'<details><summary>Method</summary><p>Decode ceiling: <code>{_esc(method.get("decode_ceiling"))}</code>; '
+                   f'prefill ceiling: <code>{_esc(method.get("prefill_ceiling"))}</code>; KV capacity: '
+                   f'{_esc(method.get("kv_capacity"))}.</p><ul>{refs}</ul></details>') if method else ""
+    return (
+        "<h2>Capacity &amp; Ceilings</h2>\n"
+        f'<div class="card"><table>{body}</table>{table}{verdicts}{cmd_html}{method_html}</div>\n'
+    )
+
+
 def _analyst_report_section(metadata: dict) -> str:
     """Render the analyst-report section (PR6 hook).
 
@@ -179,6 +227,7 @@ def generate_html_report(
     intel_html = _model_intel_section(metadata)
     bottleneck_html = _bottleneck_section(metadata)
     fitness_html = _fitness_section(metadata)
+    capacity_html = _capacity_section(metadata)
     analyst_html = _analyst_report_section(metadata)
 
     # Build diagnostics HTML
@@ -295,6 +344,7 @@ def generate_html_report(
 {intel_html}
 {bottleneck_html}
 {fitness_html}
+{capacity_html}
 {analyst_html}
 <h2>Raw Results</h2>
 <div class="card" style="overflow-x:auto">

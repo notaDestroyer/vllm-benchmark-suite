@@ -9,6 +9,7 @@ License: MIT
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from typing import Dict, Optional
@@ -60,7 +61,34 @@ _GAUGE_ALIASES: dict[str, tuple[str, ...]] = {
     "gpu_cache_usage_perc": ("vllm:gpu_cache_usage_perc", "vllm:kv_cache_usage_perc", "sglang:token_usage"),
     "num_requests_waiting": ("vllm:num_requests_waiting", "sglang:num_queue_reqs"),
     "num_requests_running": ("vllm:num_requests_running", "sglang:num_running_reqs"),
+    # Total KV-cache capacity in tokens (SGLang exposes it directly; vLLM via
+    # the cache_config_info labels, handled in parse_metrics_text).
+    "kv_capacity_tokens": ("sglang:max_total_num_tokens",),
 }
+
+_CACHE_CONFIG_RE = re.compile(r'^vllm:cache_config_info\{([^}]*)\}', re.M)
+_LABEL_RE = re.compile(r'(\w+)="([^"]*)"')
+
+
+def parse_vllm_cache_config(metrics_text: str) -> Optional[int]:
+    """KV-cache capacity in tokens from vLLM's ``cache_config_info`` labels.
+
+    vLLM profiles memory at start-up and publishes ``num_gpu_blocks`` and
+    ``block_size``; their product is the exact number of tokens the KV cache
+    can hold, which is the number every capacity estimate should defer to.
+    """
+    m = _CACHE_CONFIG_RE.search(metrics_text)
+    if not m:
+        return None
+    labels = dict(_LABEL_RE.findall(m.group(1)))
+    try:
+        blocks = int(float(labels.get("num_gpu_blocks", "")))
+        block_size = int(float(labels.get("block_size", "")))
+    except ValueError:
+        return None
+    if blocks <= 0 or block_size <= 0:
+        return None
+    return blocks * block_size
 _COUNTER_ALIASES: dict[str, tuple[str, ...]] = {
     "cache_queries": ("vllm:prefix_cache_queries_total", "vllm:prefix_cache_queries"),
     "cache_hits": ("vllm:prefix_cache_hits_total", "vllm:prefix_cache_hits"),
@@ -95,6 +123,8 @@ def parse_metrics_text(metrics_text: str) -> Dict:
 
     out: Dict = dict(counters)
     out.update(gauges)
+    if out.get("kv_capacity_tokens") is None:
+        out["kv_capacity_tokens"] = parse_vllm_cache_config(metrics_text)
     out["timestamp"] = time.time()
     return out
 
