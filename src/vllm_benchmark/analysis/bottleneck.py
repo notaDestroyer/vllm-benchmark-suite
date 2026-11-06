@@ -252,8 +252,8 @@ def classify_cell(
     for n in profile.notes:
         if "quantization=" in n:
             quant = n.split("quantization=")[-1].rstrip(".")
-    dtype_key = "fp8" if quant and "fp8" in quant.lower() else "bf16"
-    peak_flops = peak_map.get(dtype_key) or peak_map.get("bf16")
+    dtype_key = peak_dtype_for(quant)
+    peak_flops = peak_map.get(dtype_key) or peak_map.get("fp8") or peak_map.get("bf16")
     bpp = bytes_per_param(quant)
 
     decode_tps_1u = result_cell.get("decode_tps_mean") or result_cell.get("decode_tps_p50")
@@ -436,6 +436,21 @@ def classify_cell(
 # ---------------------------------------------------------------------------
 # Whole-run classification
 # ---------------------------------------------------------------------------
+
+def peak_dtype_for(quant: Optional[str]) -> str:
+    """Which peak-FLOPS format governs prefill for a served weight format.
+
+    FP4 (NVFP4 / MXFP4) on Blackwell, FP8 on Ada and newer, else BF16.
+    INT4 weight-only quants (AWQ/GPTQ) dequantize to 16-bit for the matmul,
+    so they stay on the BF16 ceiling.
+    """
+    q = (quant or "").lower()
+    if "fp4" in q:
+        return "fp4"
+    if "fp8" in q:
+        return "fp8"
+    return "bf16"
+
 
 _CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
 

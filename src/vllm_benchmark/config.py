@@ -119,6 +119,7 @@ class BenchmarkConfig:
 
     # Bottleneck analysis
     bottleneck_sweep: bool = False  # Run prefill/decode roofline probes
+    gpu_spec_mode: str = "auto"  # auto|table|nvml: where roofline GPU peaks come from
 
     # Workload selection: auto|generative|embeddings|structured
     workload: str = "auto"

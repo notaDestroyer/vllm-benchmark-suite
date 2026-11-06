@@ -38,6 +38,7 @@ dependencies = [
     "huggingface_hub>=0.23",
     "scipy>=1.11",
     "psutil>=5.9",
+    "nvidia-ml-py>=12.535",
 ]
 
 [project.optional-dependencies]

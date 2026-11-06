@@ -30,6 +30,12 @@ def infer_quantization(model_name: Optional[str]) -> str:
         A quantization label such as ``"FP8"`` or ``"FP16/BF16"``.
     """
     model_name_upper = (model_name or "").upper()
+    if "NVFP4" in model_name_upper:
+        return "NVFP4"
+    if "MXFP4" in model_name_upper:
+        return "MXFP4"
+    if "FP4" in model_name_upper:
+        return "FP4"
     if "FP8" in model_name_upper:
         return "FP8"
     elif "AWQ" in model_name_upper:

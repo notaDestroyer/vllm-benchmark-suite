@@ -53,6 +53,8 @@ Quality:
   --quality-ref URL      Reference endpoint for --quality kl
 
 Analysis:
+  --gpu-spec MODE        auto|table|nvml: where roofline peaks come from (default auto:
+                         derive from the local GPU via NVML, cross-check the built-in table)
   --bottleneck-sweep     Run prefill/decode roofline probes to measure the critical batch
   --detailed-summary     Print the full per-cell summary tables after the run
   --leaderboard [DIR]    Standalone: write LEADERBOARD.md from result_*.json in DIR (default ./outputs) and exit
@@ -188,6 +190,17 @@ Each cell gets one governing class, decided in this order:
 | `unknown` | no model profile or GPU spec, or no streaming split | collect streaming pp/tg metrics and a known model profile |
 
 Confidence comes from the latency coefficient of variation (under 0.10 high, under 0.30 medium) and is lowered when the analytic and empirical critical batch disagree. The headline verdict is the highest-confidence cell, ties broken toward the highest concurrency.
+
+### GPU spec source
+
+Roofline peaks come from one of two places, chosen by `--gpu-spec`:
+
+- **Derived from the device (NVML).** On an NVIDIA host the suite reads CUDA core count, max SM clock, memory bus width, max memory clock and compute capability and computes: bandwidth = bus width / 8 × memory clock × 2; dense FP16/BF16 peak = SMs × boost clock × FLOP-per-SM-per-clock (2048 on A100, 1024 on professional Ampere/Ada/Blackwell, 512 on GeForce because of the FP32-accumulate half rate, 4096 on Hopper, 8192 on B200); FP8 = 2× on Ada and newer; FP4 = 4× on Blackwell. This is exact for the installed part, including Max-Q and power-limited variants, and is the only source of the FP4 ceiling that NVFP4 / MXFP4 models need.
+- **The curated table** (`data/gpu_specs.json`), used on client machines without a driver and as a cross-check.
+
+In `auto` mode both are combined per field: when the table and the device agree within 15 percent the table's datasheet value is kept and marked `table (nvml-confirmed)` (Hopper datasheets use a lower clock basis than NVML's max boost); when they disagree the device wins, the source is reported as `nvml (table overridden)` and the discrepancy is printed and stored in `system_info.gpu_spec._notes`. The resolved spec, the device facts (SM count, clocks, bus width, power limit) and the source are stored under `metadata.system_info.gpu_spec`.
+
+The prefill compute ceiling is chosen by the served weight format: FP4 peak for NVFP4/MXFP4, FP8 peak for FP8, BF16 otherwise (INT4 weight-only quants dequantize to 16-bit for the matmul).
 
 MBU = decode bytes moved per second / peak HBM bandwidth, where bytes per token = active parameters × bytes per parameter + KV bytes per token × context. Reported for single-user cells only. MFU = prefill tokens per second × 2 × active parameters / peak FLOPs for the served dtype (FP8 peak when the quant is FP8). The critical batch B* = peak FLOPs / (HBM bandwidth × bytes per parameter) / 2.
 

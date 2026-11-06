@@ -48,6 +48,9 @@ from vllm_benchmark.core.hardware.gpu_names import match_gpu_key
 
 #: Bytes per parameter / per KV element by dtype or quantization name.
 _BYTES_BY_DTYPE = {
+    "nvfp4": 0.5,
+    "mxfp4": 0.5,
+    "fp4": 0.5,
     "fp8": 1.0,
     "f8": 1.0,
     "int8": 1.0,
@@ -188,6 +191,38 @@ def match_gpu_spec(gpu_name: Optional[str]) -> Optional[dict]:
     spec = dict(specs[best_key])
     spec["_matched_key"] = best_key
     return spec
+
+
+def resolve_gpu_spec(gpu_name: Optional[str], mode: str = "auto", *, nvml_index: int = 0) -> Optional[dict]:
+    """Resolve the roofline spec for the local or named GPU.
+
+    Args:
+        gpu_name: Detected GPU name (used for the curated-table lookup).
+        mode: ``"auto"`` derives from NVML when a driver is present and
+            merges with the curated table (table wins when they agree
+            within 15%, the device wins otherwise); ``"nvml"`` uses only the
+            derivation; ``"table"`` uses only the curated entry.
+        nvml_index: Which local device to read in auto/nvml modes.
+
+    Returns:
+        A spec dict with ``hbm_bandwidth_gbps``, ``peak_flops_tflops``
+        (``bf16``/``fp8``/``fp4``/``int8``), ``_source``, optional
+        ``_matched_key``, ``_device`` and ``_notes``; or ``None``.
+    """
+    from vllm_benchmark.core.hardware.gpu_derive import derive_local_gpu_spec, merge_with_table
+
+    table = match_gpu_spec(gpu_name) if mode in ("auto", "table") else None
+    if table is not None:
+        table.setdefault("_source", "table")
+    if mode == "table":
+        return table
+    derived = derive_local_gpu_spec(nvml_index)
+    if mode == "nvml":
+        return derived
+    merged = merge_with_table(derived, table)
+    if merged is not None and table is not None:
+        merged.setdefault("_matched_key", table.get("_matched_key"))
+    return merged
 
 
 # ---------------------------------------------------------------------------

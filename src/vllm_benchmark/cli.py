@@ -214,6 +214,10 @@ Examples:
     analysis = parser.add_argument_group("Analysis")
     analysis.add_argument("--bottleneck-sweep", action="store_true",
                           help="Run prefill/decode roofline probes to find the empirical critical batch")
+    analysis.add_argument("--gpu-spec", choices=["auto", "table", "nvml"], default="auto",
+                          help="Roofline GPU spec source: auto = derive from the local GPU via NVML and "
+                               "cross-check the built-in table (default); table = built-in table only; "
+                               "nvml = device-derived only")
     analysis.add_argument("--detailed-summary", action="store_true",
                           help="Print the full per-cell performance summary tables after the run")
     analysis.add_argument("--leaderboard", nargs="?", const="./outputs", default=None, metavar="DIR",
@@ -292,10 +296,10 @@ def _run_non_generative_workloads(
 
     # Build advisory + fitness from whatever workloads ran.
     try:
-        from vllm_benchmark.analysis.model_intel import build_profile, match_gpu_spec
+        from vllm_benchmark.analysis.model_intel import build_profile, resolve_gpu_spec
 
         model_profile = build_profile(backend_server_info)
-        gpu_spec = match_gpu_spec(system_info.get("gpu_name"))
+        gpu_spec = resolve_gpu_spec(system_info.get("gpu_name"), config.gpu_spec_mode)
         advisory = build_advisory(
             all_cells, model_profile, backend_server_info, gpu_spec,
             profile_metrics=profile_metrics,
@@ -608,6 +612,7 @@ def main():
     if tokenizer_override:
         config.tokenizer = tokenizer_override
     config.backend = args.backend
+    config.gpu_spec_mode = args.gpu_spec
     config.warmup = not args.no_warmup
     config.generate_html = not args.no_html
     config.generate_charts = not args.no_charts
@@ -969,14 +974,24 @@ def main():
         from vllm_benchmark.analysis.model_intel import (
             build_profile,
             critical_batch,
-            match_gpu_spec,
             mbu,
             mfu,
+            resolve_gpu_spec,
         )
 
         profile = build_profile(backend_server_info)
-        gpu_spec = match_gpu_spec(system_info.get("gpu_name"))
+        gpu_spec = resolve_gpu_spec(system_info.get("gpu_name"), config.gpu_spec_mode)
         model_profile_dict = profile.to_dict()
+        if gpu_spec:
+            system_info["gpu_spec"] = gpu_spec
+            src = gpu_spec.get("_source", "table")
+            dev = gpu_spec.get("_device") or {}
+            peaks = gpu_spec.get("peak_flops_tflops") or {}
+            detail = ", ".join(f"{k}={v:.0f}" for k, v in peaks.items() if v)
+            arch = f" {dev['architecture']}, {dev['sm_count']} SMs" if dev.get("sm_count") else ""
+            console.print(f"[dim]GPU spec: {src}{arch}; {gpu_spec.get('hbm_bandwidth_gbps')} GB/s; TFLOPS {detail}[/dim]")
+            for note in gpu_spec.get("_notes") or []:
+                console.print(f"[yellow]  {note}[/yellow]")
 
         verdicts = classify_run(reporting_results, profile, gpu_spec, server_info=backend_server_info)
         bottleneck_dicts = [v.to_dict() for v in verdicts]
