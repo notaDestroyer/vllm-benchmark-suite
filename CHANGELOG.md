@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **Device-derived GPU specs** — on an NVIDIA host the roofline bandwidth and
+  dense BF16/FP8/FP4 peaks are computed from the card's own CUDA core count,
+  clocks, bus width and compute capability via NVML (`nvidia-ml-py`, now a
+  dependency), using per-architecture constants from Ampere to Blackwell and the
+  GeForce FP32-accumulate half rate. `--gpu-spec auto|table|nvml` selects the
+  source; `auto` cross-checks the curated table and overrides it when they
+  disagree by more than 15%, reporting the discrepancy. Device facts and the
+  resolved spec are stored in `system_info.gpu_spec`.
+- FP4 support in the roofline: NVFP4 / MXFP4 / FP4 quantization is detected,
+  weighs 0.5 B/param, and prefill MFU uses the FP4 peak.
+
+### Fixed
+- `gpu_specs.json`: the RTX PRO 6000 Blackwell entry used GeForce-halved
+  tensor rates (251 / 503 TFLOPS); the professional part runs full rate, so it is
+  now 503.8 BF16 / 1007.6 FP8 / 2015.2 FP4. FP4 added for the RTX 5090 (838).
+- Fitness verdict no longer names the same profile as best and worst.
+
 ## v4.1.0 - Correctness & Review Fixes (2026-11-06)
 
 First release since v3.1.1 on PyPI: v4.0.0 was tagged in the changelog but never

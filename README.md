@@ -23,6 +23,7 @@ Most "my 3090 does X tok/s" posts measure one thing, once, with one concurrent r
 - **Hits the server properly.** True async concurrency via `aiohttp`, real Time-to-First-Token from the SSE stream, and prefill vs decode throughput measured separately instead of guessed from a ratio.
 - **Counts tokens with the model's tokenizer**, not `len(text) // 4`. Use `--tokenizer` for gated or locally served models.
 - **Knows what it is benchmarking.** Dense or MoE, active vs total parameters, GQA/MQA, KV-cache bytes per token. That feeds a roofline model that tells you whether each load point is bandwidth-bound, compute-bound, queueing, or out of KV cache, and what to change.
+- **Knows your GPU from the GPU.** On the host it derives bandwidth and dense BF16/FP8/FP4 peaks from the card's own SM count, clocks and bus width via NVML, so a 300 W Max-Q and a 600 W PRO 6000 get their real ceilings, NVFP4 models get an FP4 ceiling, and the built-in table is only a cross-check.
 - **Tells you when a difference is noise.** `--iterations` gives confidence intervals; comparisons use Welch, Mann-Whitney, effect sizes and Holm correction. A "win" is only declared when it is statistically and practically significant.
 - **Makes the post for you.** `--share` writes a Markdown table you can paste into a thread, plus a result-card PNG.
 
@@ -234,7 +235,8 @@ GPU names are matched by token, so `NVIDIA A100-SXM4-80GB`, `NVIDIA H100 80GB HB
 | Symptom | Cause and fix |
 |---------|---------------|
 | `Error loading model tokenizer! Using google/gemma3-4b-it instead` | The served model name is not a public HF repo (gated, local path, custom name). Pass `--tokenizer org/repo-or-local-path` or set `VLLM_BENCH_TOKENIZER`. Token counts are still correct from the server's `usage` field; this only affects prompt generation length. |
-| Bottleneck is `unknown`, MBU/MFU are `N/A` | The GPU name did not match the built-in spec table, or the model could not be profiled. Check `model_profile.source` in the JSON. Spec and model tables live in `src/vllm_benchmark/data/`. |
+| Bottleneck is `unknown`, MBU/MFU are `N/A` | Run on the GPU host so the spec can be derived from the device (`--gpu-spec auto`, needs the NVIDIA driver), or the model could not be profiled: check `model_profile.source` and `system_info.gpu_spec._source` in the JSON. The fallback table lives in `src/vllm_benchmark/data/gpu_specs.json`. |
+| MFU looks 2x too high or low | Check `system_info.gpu_spec._source`. GeForce cards run FP16 tensor math at half rate with FP32 accumulate; professional cards do not. The device-derived spec handles this; the table entry may not. `--gpu-spec nvml` forces the derivation. |
 | `kv_capacity` / `queue` never appear, cache hit rate is empty | `/metrics` is not reachable. On SGLang start the server with `--enable-metrics`. Behind a proxy, make sure `/metrics` is forwarded. |
 | Warmup fails, or the first cell times out | Cold model and a large first prompt. `--no-warmup` skips the warmup request; `--context-lengths` smaller than `--max-model-len` avoids the 400 from the server. |
 | All requests fail with HTTP 400 at a context length | The prompt exceeds the server's `--max-model-len`. Lower `--context-lengths`. |
