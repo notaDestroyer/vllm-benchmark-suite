@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 
 from vllm_benchmark.config import GPU_BASELINES
+from vllm_benchmark.core.hardware.gpu_names import match_gpu_key
 
 
 @dataclass
@@ -248,18 +249,17 @@ class VLLMScore:
 
     @staticmethod
     def _match_gpu_baseline(gpu_name: str) -> tuple[str | None, dict | None]:
-        """Fuzzy-match a GPU name against GPU_BASELINES keys.
+        """Match a detected GPU name against GPU_BASELINES keys.
 
-        Checks if any baseline key is a substring of gpu_name or vice versa
-        (case-insensitive). Returns (matched_key, baseline_dict) or
-        (None, None) if no match is found.
+        Uses the shared token matcher so real ``nvidia-smi`` names such as
+        ``"NVIDIA A100-SXM4-80GB"`` or ``"4x NVIDIA H100 80GB HBM3"`` resolve
+        to the right baseline and short keys never over-match.  Returns
+        ``(matched_key, baseline_dict)`` or ``(None, None)``.
         """
-        gpu_lower = gpu_name.lower()
-        for key, baseline in GPU_BASELINES.items():
-            key_lower = key.lower()
-            if key_lower in gpu_lower or gpu_lower in key_lower:
-                return key, baseline
-        return None, None
+        key = match_gpu_key(gpu_name, GPU_BASELINES.keys())
+        if key is None:
+            return None, None
+        return key, GPU_BASELINES[key]
 
     @staticmethod
     def _compute_gpu_percentile(results: list[dict], baseline: dict) -> int:

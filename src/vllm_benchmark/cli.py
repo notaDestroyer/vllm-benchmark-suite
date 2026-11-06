@@ -597,13 +597,11 @@ def main():
     # ---- Auto-detect GPU cost ----
     cost_per_hour = args.cost  # explicit CLI override takes priority
     if cost_per_hour is None:
-        gpu_name = system_info.get("gpu_name", "")
-        if gpu_name:
-            gpu_lower = gpu_name.lower()
-            for pricing_key, price in GPU_PRICING.items():
-                if pricing_key.lower() in gpu_lower or gpu_lower in pricing_key.lower():
-                    cost_per_hour = price
-                    break
+        from vllm_benchmark.core.hardware.gpu_names import match_gpu_key
+        pricing_key = match_gpu_key(system_info.get("gpu_name"), GPU_PRICING.keys())
+        if pricing_key is not None:
+            # Pricing is per GPU; a multi-GPU host costs gpu_count times as much.
+            cost_per_hour = GPU_PRICING[pricing_key] * max(1, int(system_info.get("gpu_count") or 1))
 
     # Display system panel
     sys_table = Table(show_header=False, box=box.ROUNDED, border_style="green")

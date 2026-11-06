@@ -40,6 +40,7 @@ from functools import lru_cache
 from typing import Any, Literal, Optional
 
 from vllm_benchmark.core.backends.base import ServerInfo
+from vllm_benchmark.core.hardware.gpu_names import match_gpu_key
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -168,42 +169,20 @@ def load_gpu_specs() -> dict:
 def match_gpu_spec(gpu_name: Optional[str]) -> Optional[dict]:
     """Fuzzy-match a detected GPU name to a spec entry.
 
+    Delegates to :func:`vllm_benchmark.core.hardware.gpu_names.match_gpu_key`
+    so the roofline table, the scoring baselines and the pricing table all
+    resolve a name the same way.
+
     Args:
-        gpu_name: Raw GPU name, e.g. ``"NVIDIA H100 80GB HBM3"``.
+        gpu_name: Raw GPU name, e.g. ``"NVIDIA H100 80GB HBM3"`` or
+            ``"2x NVIDIA A100-SXM4-80GB"``.
 
     Returns:
         The matching spec dict (with an added ``"_matched_key"``), or
         ``None`` when no entry matches.
     """
-    if not gpu_name:
-        return None
     specs = load_gpu_specs()
-    cleaned = gpu_name.lower().replace("nvidia ", "")
-    # Normalize separators so "A100-SXM4-80GB" and "A100 80GB" tokenize alike.
-    norm = re.sub(r"[-_/]", " ", cleaned)
-    detected_tokens = set(norm.split())
-
-    best_key: Optional[str] = None
-    best_score = 0.0
-    for key in specs:
-        key_norm = re.sub(r"[-_/]", " ", key.lower())
-        key_tokens = [t for t in key_norm.split() if t]
-        if not key_tokens:
-            continue
-        # Whole-key substring match is the strongest signal.
-        if key_norm in norm:
-            score = 100 + len(key_norm)
-        else:
-            matched = sum(1 for t in key_tokens if t in detected_tokens)
-            if matched == 0:
-                continue
-            # Require the model token (first) to be present.
-            if key_tokens[0] not in detected_tokens:
-                continue
-            score = matched
-        if score > best_score:
-            best_score = score
-            best_key = key
+    best_key = match_gpu_key(gpu_name, specs.keys())
     if best_key is None:
         return None
     spec = dict(specs[best_key])
