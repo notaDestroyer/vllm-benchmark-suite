@@ -533,7 +533,22 @@ def main():
     config.generate_html = not args.no_html
     config.generate_charts = not args.no_charts
     if args.prompts_file:
+        # Validate up front so a bad file fails before the server is touched,
+        # and collapse the prompt-type axis: every cell uses the file.
+        from vllm_benchmark.core.async_engine import CUSTOM_PROMPT_TYPE
+        from vllm_benchmark.core.prompts import load_custom_prompts
+        try:
+            n_custom = len(load_custom_prompts(args.prompts_file))
+        except Exception as exc:
+            console.print(f"[red]Cannot load --prompts-file {args.prompts_file}: {exc}[/red]")
+            sys.exit(2)
+        if n_custom == 0:
+            console.print(f"[red]--prompts-file {args.prompts_file} contains no prompts[/red]")
+            sys.exit(2)
         config.prompts_file = args.prompts_file
+        config.prompt_types = [CUSTOM_PROMPT_TYPE]
+        if args.prompt_type:
+            console.print("[yellow]--prompt-type is ignored when --prompts-file is given[/yellow]")
 
     # Seed for reproducibility
     if args.seed is not None:
@@ -614,7 +629,10 @@ def main():
     console.print(f"\n[bold]Test plan:[/bold] {config.total_tests} configs x {iterations} iterations = {total_runs} runs")
     console.print(f"  Context:     {', '.join(f'{c // 1000}K' for c in config.context_lengths)}")
     console.print(f"  Concurrency: {', '.join(str(u) for u in config.concurrency_levels)}")
-    console.print(f"  Prompts:     {', '.join(config.prompt_types)}")
+    if config.prompts_file:
+        console.print(f"  Prompts:     custom ({config.prompts_file}); context lengths label the matrix only")
+    else:
+        console.print(f"  Prompts:     {', '.join(config.prompt_types)}")
     console.print(f"  Output:      {config.output_tokens} tokens")
     if config.streaming:
         console.print("  TTFT:        [green]Streaming (true measurement)[/green]")
