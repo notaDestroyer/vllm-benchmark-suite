@@ -430,6 +430,7 @@ The repository ships a composite action (`action.yml`) that installs the suite, 
 
 ```yaml
 - uses: notadestroyer/vllm-benchmark-suite@main
+  id: bench
   with:
     vllm-url: http://localhost:8000
     preset: quick                       # quick | standard | thorough
