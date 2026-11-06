@@ -390,8 +390,9 @@ async def run_prefill_probe(
         A list of per-batch result dicts (``probe == "prefill"``).
     """
     prompt_gen = get_prompt_generator(prompt_type)
-    prompt = prompt_gen(context_length, model_name or "")
-    actual_prompt_tokens = count_tokens(prompt, model_name or "")
+    tok = config.tokenizer_id(model_name)
+    prompt = prompt_gen(context_length, tok)
+    actual_prompt_tokens = count_tokens(prompt, tok)
     out: list[Dict] = []
     probe_cfg = BenchmarkConfig(**{**config.__dict__})
     probe_cfg.output_tokens = 1
@@ -428,8 +429,9 @@ async def run_decode_probe(
         A list of per-batch result dicts (``probe == "decode"``).
     """
     prompt_gen = get_prompt_generator(prompt_type)
-    prompt = prompt_gen(short_context, model_name or "")
-    actual_prompt_tokens = count_tokens(prompt, model_name or "")
+    tok = config.tokenizer_id(model_name)
+    prompt = prompt_gen(short_context, tok)
+    actual_prompt_tokens = count_tokens(prompt, tok)
     out: list[Dict] = []
     probe_cfg = BenchmarkConfig(**{**config.__dict__})
     probe_cfg.output_tokens = decode_tokens
@@ -752,7 +754,7 @@ def resolve_prompts(
     if prompt_type == CUSTOM_PROMPT_TYPE:
         raise ValueError("prompt_type 'custom' requires config.prompts_file to be set")
     prompt_gen = get_prompt_generator(prompt_type)
-    return [prompt_gen(context_length, model_name or "")], prompt_type, "generated"
+    return [prompt_gen(context_length, config.tokenizer_id(model_name))], prompt_type, "generated"
 
 
 def custom_prompt_generator(config: BenchmarkConfig) -> "Callable[[int, str], str]":
@@ -832,7 +834,7 @@ async def run_benchmark_async(
     # Only the prompts that will actually be sent count toward the average;
     # counts for a prompts file are memoised across cells.
     actual_prompt_tokens = _mean_prompt_tokens(
-        prompts, model_name or "",
+        prompts, config.tokenizer_id(model_name),
         cache_key=config.prompts_file if prompt_source == "file" else None,
         n_used=num_concurrent_users,
     )
@@ -903,7 +905,7 @@ async def run_sustained_benchmark(
 
     effective_users = int(target_rps * (mean([r["duration"] for r in results if r.get("success")]) if results else 1))
     actual_prompt_tokens = _mean_prompt_tokens(
-        prompts, model_name or "",
+        prompts, config.tokenizer_id(model_name),
         cache_key=config.prompts_file if prompt_source == "file" else None,
         n_used=len(results) or 1,
     )
