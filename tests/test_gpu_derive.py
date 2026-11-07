@@ -74,10 +74,22 @@ def test_int8_rates():
     assert derive_peak_flops("L40S", (8, 9), 18176, 2520)["int8"] == pytest.approx(733, rel=0.01)
 
 
+def test_blackwell_ultra_and_gb10_constants():
+    # B300: 160 SMs, dense FP4 is 6x FP16 (15 vs 2.25 PF), FP8 unchanged at 2x.
+    peaks = derive_peak_flops("NVIDIA B300", (10, 3), 160 * 128, 1965)
+    assert peaks["fp4"] == pytest.approx(peaks["bf16"] * 6, rel=0.001)
+    assert peaks["fp8"] == pytest.approx(peaks["bf16"] * 2, rel=0.001)
+    # GB10 (DGX Spark, cc 12.1): full-rate tensor cores, not GeForce-halved.
+    gb10 = derive_peak_flops("NVIDIA GB10", (12, 1), 6144, 2543)
+    assert gb10["bf16"] == pytest.approx(125, rel=0.01) and gb10["fp4"] == pytest.approx(500, rel=0.01)
+    assert arch_for((10, 3)).family == "Blackwell Ultra (GB300)"
+    assert arch_for((12, 1)).family == "Blackwell (GB10)"
+
+
 def test_arch_for_fallbacks():
     assert arch_for((8, 6)).family.startswith("Ampere")
     assert arch_for((8, 8)).family == arch_for((8, 9)).family  # nearest known minor
-    assert arch_for((12, 1)).family == arch_for((12, 0)).family
+    assert arch_for((12, 9)).family == arch_for((12, 1)).family  # unknown minor: nearest known
     assert arch_for((7, 5)) is None  # Turing unsupported
     assert arch_for(None) is None
 

@@ -60,6 +60,7 @@ class Sku:
     halved: bool = False     # GeForce-style half-rate FP16 w/ FP32 accumulate
     datasheet_bf16: Optional[float] = None   # pin BF16 peak (TFLOPS) when the formula does not apply
     datasheet_bw: Optional[float] = None     # pin bandwidth (GB/s) when memory_gbps is not public
+    datasheet_fp4: Optional[float] = None    # pin dense FP4 when it is not 4x BF16 (Blackwell Ultra)
     note: str = ""
 
 
@@ -117,18 +118,42 @@ SKUS: list[Sku] = [
         note="HBM3 4000 GB/s; compute-limited part"),
     # ---------------- Blackwell, GB100 (cc 10.0) ----------------
     Sku("B200", "NVIDIA B200", (10, 0), 148, 1965, 8192, 7.81, 180, datasheet_bf16=2250.0,
-        note="HBM3e 8000 GB/s; dense FP16 2.25 PF, FP8 4.5 PF, FP4 9 PF"),
+        note="HBM3e ~8 TB/s; nvidia-smi reports 183359 MiB; dense FP16 2.25 PF, FP8 4.5 PF, FP4 9 PF"),
+    # ---------------- Blackwell Ultra, GB300 (cc 10.3) ----------------
+    Sku("B300", "NVIDIA B300", (10, 3), 160, 1965, 8192, 7.81, 288, datasheet_bf16=2250.0, datasheet_fp4=15000.0,
+        note="HBM3e ~8 TB/s; dense FP4 15 PF (Blackwell Ultra); FP16/FP8 per third-party summaries, "
+             "unverified against the NVIDIA datasheet"),
     # ---------------- Blackwell, GB20x (cc 12.0) ----------------
+    # Professional parts: BF16 pinned from NVIDIA's AI TOPS (sparse FP4) / 8,
+    # which is the published figure; the advertised boost clock over-states it.
     Sku("RTX PRO 6000 Blackwell", "NVIDIA RTX PRO 6000 Blackwell Workstation Edition", (12, 0), 188, 2617, 512, 28.0, 96,
-        note="also Max-Q (300 W) and Server Edition; same silicon"),
-    Sku("RTX PRO 5000 Blackwell", "NVIDIA RTX PRO 5000 Blackwell", (12, 0), 110, 2617, 384, 28.0, 48),
-    Sku("RTX PRO 4500 Blackwell", "NVIDIA RTX PRO 4500 Blackwell", (12, 0), 82, 2617, 256, 28.0, 32),
-    Sku("RTX 5090", "NVIDIA GeForce RTX 5090", (12, 0), 170, 2407, 512, 28.0, 32, halved=True),
+        datasheet_bf16=503.8,
+        note="4000 AI TOPS; 600 W; the Max-Q Workstation Edition (300 W) is the same silicon and 1792 GB/s"),
+    Sku("RTX PRO 6000 Blackwell Server Edition", "NVIDIA RTX PRO 6000 Blackwell Server Edition", (12, 0), 188, 2487, 512, 24.95, 96,
+        datasheet_bf16=475.0, datasheet_bw=1597.0,
+        note="passive, 400-600 W configurable; 1597 GB/s and 3.8 PF sparse FP4 per NVIDIA/PNY, lower than the workstation card"),
+    Sku("RTX PRO 5000 Blackwell", "NVIDIA RTX PRO 5000 Blackwell", (12, 0), 110, 2378, 384, 28.0, 48,
+        datasheet_bf16=267.8,
+        note="14,080 cores; 2142 AI TOPS; 300 W; a 72 GB variant with identical compute exists (same nvidia-smi name)"),
+    Sku("RTX PRO 4500 Blackwell", "NVIDIA RTX PRO 4500 Blackwell", (12, 0), 82, 2406, 256, 28.0, 32,
+        datasheet_bf16=202.1, note="10,496 cores; 1617 AI TOPS; 200 W"),
+    Sku("RTX PRO 4500 Blackwell Server Edition", "NVIDIA RTX PRO 4500 Blackwell Server Edition", (12, 0), 82, 2406, 256, 25.0, 32,
+        datasheet_bf16=202.1, datasheet_bw=800.0, note="single-slot passive, 165 W; 800 GB/s per NVIDIA"),
+    Sku("RTX PRO 4000 Blackwell", "NVIDIA RTX PRO 4000 Blackwell", (12, 0), 70, 2250, 192, 28.0, 24,
+        datasheet_bf16=161.3,
+        note="8,960 cores; 1290 AI TOPS on NVIDIA's page (a June 2026 datasheet says 1178); 140 W; the SFF Edition "
+             "resolves here too"),
+    Sku("RTX 5090", "NVIDIA GeForce RTX 5090", (12, 0), 170, 2407, 512, 28.0, 32, halved=True, note="3352 AI TOPS"),
     Sku("RTX 5080", "NVIDIA GeForce RTX 5080", (12, 0), 84, 2617, 256, 30.0, 16, halved=True),
     Sku("RTX 5070 Ti", "NVIDIA GeForce RTX 5070 Ti", (12, 0), 70, 2452, 256, 28.0, 16, halved=True),
     Sku("RTX 5070", "NVIDIA GeForce RTX 5070", (12, 0), 48, 2512, 192, 28.0, 12, halved=True),
     Sku("RTX 5060 Ti", "NVIDIA GeForce RTX 5060 Ti", (12, 0), 36, 2572, 128, 28.0, 16, halved=True),
     Sku("RTX 5060", "NVIDIA GeForce RTX 5060", (12, 0), 30, 2497, 128, 28.0, 8, halved=True),
+    Sku("RTX 5050", "NVIDIA GeForce RTX 5050", (12, 0), 20, 2572, 128, 20.0, 8, halved=True,
+        note="desktop part uses GDDR6 at 20 Gbps (320 GB/s); the laptop RTX 5050 uses GDDR7"),
+    # ---------------- Blackwell, GB10 (cc 12.1): DGX Spark ----------------
+    Sku("GB10", "NVIDIA GB10", (12, 1), 48, 2543, 256, 8.53, 128, datasheet_bf16=125.0,
+        note="DGX Spark; 128 GB unified LPDDR5X at 273 GB/s; 1 PF sparse FP4; nvidia-smi name unverified"),
     # ---------------- Turing (cc 7.5): no per-arch rule, datasheet only ----------------
     Sku("T4", "Tesla T4", (7, 5), 40, 1590, 256, 10.0, 16, datasheet_bf16=65.0,
         note="FP16 tensor 65 TFLOPS; no BF16/FP8 support, value is FP16"),
@@ -145,7 +170,8 @@ README = (
     "from per-SKU SM count, boost clock, bus width and memory data rate using the same formulas the suite applies "
     "to a live device (core/hardware/gpu_derive.py); entries whose source is 'datasheet' pin the BF16 peak to "
     "NVIDIA's published number where the formula's clock basis differs (Hopper) or the part is cut (H20, A10G, "
-    "T4). Do not edit by hand: edit the SKU list in the script and regenerate. On an NVIDIA host the suite derives "
+    "T4, and the RTX PRO Blackwell cards, pinned from NVIDIA's published AI TOPS / 8). Do not edit by hand: edit the "
+    "SKU list in the script and regenerate. On an NVIDIA host the suite derives "
     "the spec from the device and cross-checks this table (see --gpu-spec)."
 )
 
@@ -163,7 +189,10 @@ def build_entry(sku: Sku) -> dict:
         bf16 = round(sku.sms * sku.boost_mhz * 1e6 * per_clk / 1e12, 1)
         source = "derived"
     fp8 = round(bf16 * 2, 1) if (arch and arch.fp8) else None
-    fp4 = round(bf16 * 4, 1) if (arch and arch.fp4) else None
+    if sku.datasheet_fp4 is not None:
+        fp4: Optional[float] = float(sku.datasheet_fp4)
+    else:
+        fp4 = round(bf16 * arch.fp4_multiplier, 1) if (arch and arch.fp4) else None
     int8 = round(bf16 * (arch.int8_multiplier if arch else 2.0), 1)
     return {
         "hbm_bandwidth_gbps": float(bw),
@@ -195,22 +224,65 @@ def render(table: dict) -> str:
     return json.dumps(table, indent=2) + "\n"
 
 
+DOCS = ROOT / "docs" / "gpus.md"
+
+
+def render_docs(table: dict) -> str:
+    """Markdown list of every supported card, grouped by architecture."""
+    lines = [
+        "# Supported GPUs",
+        "",
+        "Cards in the built-in roofline table (`src/vllm_benchmark/data/gpu_specs.json`), generated by",
+        "`scripts/gen_gpu_specs.py`. On an NVIDIA host the suite derives the spec from the device itself and uses",
+        "this table only as a cross-check, so a card missing here still gets a correct roofline when the benchmark",
+        "runs on the GPU host (`--gpu-spec auto`). Peaks are dense tensor TFLOPS with FP32 accumulate; `fp4` is",
+        "Blackwell-only. `source` is `derived` (from SM count x boost clock x per-SM rate) or `datasheet` (pinned to",
+        "NVIDIA's published figure where the formula's clock basis differs or the part is cut).",
+        "",
+        "To add a card: add one `Sku(...)` line to the script and run `python scripts/gen_gpu_specs.py`.",
+        "",
+    ]
+    by_arch: dict[str, list[tuple[str, dict]]] = {}
+    for key, v in table.items():
+        if key == "_README":
+            continue
+        by_arch.setdefault(v["architecture"], []).append((key, v))
+    order = ["Blackwell Ultra (GB300)", "Blackwell (GB100)", "Blackwell (GB20x)", "Blackwell (GB10)",
+             "Hopper", "Ada Lovelace", "Ampere (GA100)", "Ampere (GA10x)", "Turing"]
+    for arch in order + [a for a in by_arch if a not in order]:
+        if arch not in by_arch:
+            continue
+        lines += [f"## {arch}", "",
+                  "| Key | nvidia-smi name | Memory | GB/s | BF16 | FP8 | FP4 | Source |",
+                  "|---|---|---|---|---|---|---|---|"]
+        for key, v in by_arch[arch]:
+            pk = v["peak_flops_tflops"]
+            fmt = lambda x: "-" if x is None else f"{x:,.0f}"  # noqa: E731
+            lines.append(f"| {key} | `{v['smi_name']}` | {v['memory_gb']:g} GB | {v['hbm_bandwidth_gbps']:,.0f} | "
+                         f"{fmt(pk['bf16'])} | {fmt(pk['fp8'])} | {fmt(pk['fp4'])} | {v['source']} |")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--check", action="store_true", help="exit 1 if the committed JSON differs from the generated one")
     ap.add_argument("--out", default=str(OUT))
     args = ap.parse_args(argv)
-    text = render(build_table())
+    table = build_table()
+    text = render(table)
+    docs = render_docs(table)
     out = Path(args.out)
     if args.check:
-        current = out.read_text() if out.exists() else ""
-        if current != text:
-            print(f"{out} is stale; run scripts/gen_gpu_specs.py", file=sys.stderr)
+        stale = [str(p) for p, want in ((out, text), (DOCS, docs)) if (p.read_text() if p.exists() else "") != want]
+        if stale:
+            print(f"stale: {', '.join(stale)}; run scripts/gen_gpu_specs.py", file=sys.stderr)
             return 1
-        print(f"{out} is up to date ({len(SKUS)} SKUs)")
+        print(f"{out} and {DOCS} are up to date ({len(SKUS)} SKUs)")
         return 0
     out.write_text(text)
-    print(f"wrote {out} ({len(SKUS)} SKUs)")
+    DOCS.write_text(docs)
+    print(f"wrote {out} and {DOCS} ({len(SKUS)} SKUs)")
     return 0
 
 

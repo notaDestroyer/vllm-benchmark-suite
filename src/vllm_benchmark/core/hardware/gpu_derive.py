@@ -59,6 +59,10 @@ class ArchConstants:
     fp4: bool
     #: INT8 relative to dense FP16 (2x on Ampere, equal to FP8 rate later).
     int8_multiplier: float
+    #: Dense FP4 relative to dense FP16: 4x on Blackwell; Blackwell Ultra
+    #: (B300 / GB300, cc 10.3) raised dense FP4 by 1.5x (15 vs 10 PFLOPS per
+    #: GPU in NVL72 terms) without changing FP8/FP16.
+    fp4_multiplier: float = 4.0
 
 
 #: Keyed by compute capability (major, minor).
@@ -75,8 +79,12 @@ ARCH_CONSTANTS: dict[tuple[int, int], ArchConstants] = {
     (9, 0): ArchConstants("Hopper", 128, 4096, False, True, False, 2.0),
     # GB100/GB200: B200, GB200, B100.
     (10, 0): ArchConstants("Blackwell (GB100)", 128, 8192, False, True, True, 2.0),
+    # Blackwell Ultra: B300, GB300 (and the GB300 DGX Station).
+    (10, 3): ArchConstants("Blackwell Ultra (GB300)", 128, 8192, False, True, True, 2.0, fp4_multiplier=6.0),
     # GB20x: RTX PRO 6000 Blackwell, RTX 50xx.
     (12, 0): ArchConstants("Blackwell (GB20x)", 128, 1024, True, True, True, 2.0),
+    # GB10: DGX Spark (full-rate tensor cores, LPDDR5X unified memory).
+    (12, 1): ArchConstants("Blackwell (GB10)", 128, 1024, False, True, True, 2.0),
 }
 
 _GEFORCE_MARKERS = ("geforce", "titan")
@@ -155,7 +163,7 @@ def derive_peak_flops(
     return {
         "bf16": round(fp16, 1),
         "fp8": round(fp16 * 2, 1) if arch.fp8 else None,
-        "fp4": round(fp16 * 4, 1) if arch.fp4 else None,
+        "fp4": round(fp16 * arch.fp4_multiplier, 1) if arch.fp4 else None,
         "int8": round(fp16 * arch.int8_multiplier, 1),
     }
 

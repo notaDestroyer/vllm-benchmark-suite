@@ -58,6 +58,13 @@ _SOFT_TOKENS = frozenset({"sxm", "sxm4", "sxm5", "pcie", "nvl", "hbm3", "hbm2e"}
 #: SUPER is not a 4080).  When the *name* carries one, the key must too.
 _VARIANT_TOKENS = frozenset({"ti", "super"})
 
+#: Generation words that some drivers omit from the reported name ("NVIDIA
+#: RTX PRO 6000" for the Blackwell part).  Missing from the name is fine; a
+#: *different* generation word in the name, or the pre-Ada "Quadro" branding,
+#: rejects the key so a Quadro RTX 6000 never resolves to the RTX 6000 Ada.
+_GENERATION_TOKENS = frozenset({"ada", "blackwell", "hopper", "ampere"})
+_PRE_ADA_BRANDS = frozenset({"quadro"})
+
 
 def _is_soft(token: str) -> bool:
     return token in _SOFT_TOKENS or bool(_MEM_RE.match(token))
@@ -81,6 +88,9 @@ def _score(name_tokens: list[str], key_tokens: list[str]) -> Optional[float]:
       the name says ``80gb``) rejects the key.
     * A variant suffix in the name (``Ti``, ``SUPER``) that the key lacks
       rejects the key: those are different dies.
+    * A generation word in the key (``Ada``, ``Blackwell``) may be missing
+      from the name, since some drivers report just ``"NVIDIA RTX PRO
+      6000"``; a different generation word, or ``Quadro`` branding, rejects.
     * Score = tokens matched minus ``0.1`` per missing soft token.
     """
     if not key_tokens or not name_tokens:
@@ -89,6 +99,10 @@ def _score(name_tokens: list[str], key_tokens: list[str]) -> Optional[float]:
     key_set = set(key_tokens)
     if any(t in _VARIANT_TOKENS and t not in key_set for t in name_tokens):
         return None  # "RTX 3080 Ti" must not resolve to the "RTX 3080" entry
+    key_gen = key_set & _GENERATION_TOKENS
+    name_gen = name_set & _GENERATION_TOKENS
+    if key_gen and ((name_gen and name_gen != key_gen) or (name_set & _PRE_ADA_BRANDS)):
+        return None  # different generation named, or Quadro-era branding
     name_mem = {t for t in name_tokens if _MEM_RE.match(t)}
     matched = 0
     missing = 0
@@ -98,7 +112,7 @@ def _score(name_tokens: list[str], key_tokens: list[str]) -> Optional[float]:
             continue
         if _MEM_RE.match(tok) and name_mem and tok not in name_mem:
             return None  # contradicting memory size
-        if not _is_soft(tok):
+        if not _is_soft(tok) and tok not in _GENERATION_TOKENS:
             return None  # designator absent: a different card
         missing += 1
     if matched == 0:

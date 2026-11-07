@@ -33,14 +33,28 @@ def _gen():
 
 def test_committed_table_matches_generator():
     gen = _gen()
-    assert SPEC_PATH.read_text() == gen.render(gen.build_table()), "run scripts/gen_gpu_specs.py"
+    table = gen.build_table()
+    assert SPEC_PATH.read_text() == gen.render(table), "run scripts/gen_gpu_specs.py"
+    assert (ROOT / "docs" / "gpus.md").read_text() == gen.render_docs(table), "run scripts/gen_gpu_specs.py"
+
+
+@pytest.mark.parametrize("name, key", [
+    ("NVIDIA RTX PRO 6000", "RTX PRO 6000 Blackwell"),       # some drivers omit the generation word
+    ("NVIDIA RTX PRO 5000", "RTX PRO 5000 Blackwell"),
+    ("NVIDIA RTX 6000 Ada Generation", "RTX 6000 Ada"),
+    ("Quadro RTX 6000", None),                                 # Turing-era card: never the Ada entry
+    ("NVIDIA RTX 6000", "RTX 6000 Ada"),                       # no driver reports this; Ada is the only non-Quadro RTX 6000
+])
+def test_generation_word_optional_but_never_wrong(name, key):
+    assert match_gpu_key(name, load_gpu_specs().keys()) == key
 
 
 def test_table_covers_ampere_to_blackwell():
     specs = load_gpu_specs()
     archs = {v["architecture"] for v in specs.values()}
-    assert {"Ampere (GA100)", "Ampere (GA10x)", "Ada Lovelace", "Hopper", "Blackwell (GB100)", "Blackwell (GB20x)"} <= archs
-    assert len(specs) >= 40
+    assert {"Ampere (GA100)", "Ampere (GA10x)", "Ada Lovelace", "Hopper", "Blackwell (GB100)",
+            "Blackwell Ultra (GB300)", "Blackwell (GB20x)", "Blackwell (GB10)"} <= archs
+    assert len(specs) >= 55
 
 
 def test_every_entry_has_the_roofline_shape():
@@ -71,7 +85,11 @@ def test_every_smi_name_resolves_to_its_own_key():
     ("NVIDIA RTX 5000 Ada Generation", "RTX 5000 Ada"),
     ("NVIDIA RTX PRO 5000 Blackwell", "RTX PRO 5000 Blackwell"),
     ("NVIDIA RTX PRO 6000 Blackwell Max-Q Workstation Edition", "RTX PRO 6000 Blackwell"),
-    ("NVIDIA RTX PRO 6000 Blackwell Server Edition", "RTX PRO 6000 Blackwell"),
+    ("NVIDIA RTX PRO 6000 Blackwell Server Edition", "RTX PRO 6000 Blackwell Server Edition"),
+    ("NVIDIA RTX PRO 4500 Blackwell Server Edition", "RTX PRO 4500 Blackwell Server Edition"),
+    ("NVIDIA RTX PRO 4000 Blackwell SFF Edition", "RTX PRO 4000 Blackwell"),
+    ("NVIDIA B300", "B300"),
+    ("NVIDIA GB10", "GB10"),
     ("NVIDIA L40", "L40"),
     ("NVIDIA L40S", "L40S"),
     ("4x NVIDIA H200", "H200"),
@@ -93,7 +111,14 @@ def test_near_miss_names_resolve_correctly(name, key):
     ("H100 SXM", 3353.6, 989.4, 1978.8, None),
     ("H200", 4800, 989.4, 1978.8, None),
     ("B200", 7997.4, 2250, 4500, 9000),
+    ("B300", 7997.4, 2250, 4500, 15000),
     ("RTX PRO 6000 Blackwell", 1792, 503.8, 1007.6, 2015.2),
+    ("RTX PRO 6000 Blackwell Server Edition", 1597, 475, 950, 1900),
+    ("RTX PRO 5000 Blackwell", 1344, 267.8, 535.6, 1071.2),
+    ("RTX PRO 4500 Blackwell Server Edition", 800, 202.1, 404.2, 808.4),
+    ("RTX PRO 4000 Blackwell", 672, 161.3, 322.6, 645.2),
+    ("RTX 5050", 320, 26.3, 52.7, 105.4),  # 20 SMs x 2572 MHz x 512 (GeForce half rate)
+    ("GB10", 273, 125, 250, 500),
     ("RTX 5090", 1792, 209.5, 419, 838),
     ("RTX 5080", 960, 112.6, 225.2, 450.4),
     ("T4", 320, 65, None, None),
