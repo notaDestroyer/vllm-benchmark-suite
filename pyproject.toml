@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "vllm-benchmark-suite"
-version = "4.2.1"
+version = "4.2.2"
 description = "The most comprehensive benchmarking suite for vLLM inference servers"
 readme = "README.md"
 license = "MIT"

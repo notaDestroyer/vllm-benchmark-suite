@@ -1,6 +1,12 @@
 # Changelog
 
-## Unreleased
+## v4.2.2 - Blackwell Corrections (2026-11-07)
+
+Blackwell cards are now detected even when the driver reports the short name,
+and the Blackwell table entries were corrected against current NVIDIA and
+partner spec pages: the RTX PRO 6000 and 4500 Server Editions get their own
+(lower-bandwidth) entries and the RTX PRO 5000 / 4500 / 4000 peaks follow
+NVIDIA's published AI TOPS. 55 cards in the table. No API changes.
 
 ### Fixed
 - **Blackwell detection with short driver names** — some drivers report the
